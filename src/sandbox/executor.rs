@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::Output;
 use tokio::process::Command;
 
+#[allow(dead_code)]
 pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
@@ -11,10 +12,12 @@ pub struct CommandOutput {
     pub success: bool,
 }
 
+#[allow(dead_code)]
 pub struct Executor<'a> {
     sandbox: &'a Sandbox,
 }
 
+#[allow(dead_code)]
 impl<'a> Executor<'a> {
     pub fn new(sandbox: &'a Sandbox) -> Self {
         Self { sandbox }

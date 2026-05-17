@@ -1,3 +1,4 @@
+mod agent;
 mod app;
 mod codebase;
 mod config;
@@ -6,9 +7,9 @@ mod project;
 mod sandbox;
 mod search;
 mod session;
+mod skills;
 mod ui;
 mod util;
-mod agent;
 
 use anyhow::Result;
 use app::{AppMode, AppState};
@@ -84,8 +85,17 @@ fn run_app(
         "Welcome to LiteCode! Ollama-powered local coding agent.".into(),
     ));
     ui_state.add_output(OutputLine::System(
-        "Shift+Tab: switch mode | Enter: send | Ctrl+C: quit".into(),
+        "Shift+Tab: switch mode | Enter: send | Ctrl+C: quit | /skills: list skills".into(),
     ));
+
+    // Show loaded skills count
+    let skill_count = app_state.skills.list().len();
+    if skill_count > 0 {
+        let names: Vec<&str> = app_state.skills.list().iter().map(|s| s.name.as_str()).collect();
+        ui_state.add_output(OutputLine::System(
+            format!("Loaded {} skills: /{}", skill_count, names.join(", /")),
+        ));
+    }
 
     let ollama_client = ollama::OllamaClient::new(&app_state.config)?;
 
@@ -162,8 +172,43 @@ fn run_app(
                                 break;
                             }
 
-                            // Process the input through agent pipeline
-                            handle_input(&mut app_state, &mut ui_state, &ollama_client, &input);
+                            // Handle slash commands
+                            let trimmed = input.trim();
+                            if trimmed == "/skills" {
+                                let skills = app_state.skills.list();
+                                if skills.is_empty() {
+                                    ui_state.add_output(OutputLine::System("No skills loaded.".into()));
+                                } else {
+                                    let mut lines = vec!["Available skills:".to_string()];
+                                    for s in skills {
+                                        lines.push(format!("  /{} — {}", s.name, s.description));
+                                    }
+                                    ui_state.add_output(OutputLine::System(lines.join("\n")));
+                                }
+                            } else if let Some(cmd) = trimmed.strip_prefix('/') {
+                                let (skill_name, args) = match cmd.split_once(' ') {
+                                    Some((name, rest)) => (name, rest.trim()),
+                                    None => (cmd, ""),
+                                };
+
+                                if let Some(skill) = app_state.skills.get(skill_name).cloned() {
+                                    let full_input = if args.is_empty() {
+                                        String::new()
+                                    } else {
+                                        args.to_string()
+                                    };
+                                    handle_skill_input(
+                                        &mut app_state, &mut ui_state, &ollama_client, &skill, &full_input,
+                                    );
+                                } else {
+                                    ui_state.add_output(OutputLine::Error(
+                                        format!("Unknown skill: /{}. Type /skills to see available skills.", skill_name),
+                                    ));
+                                }
+                            } else {
+                                // Process the input through agent pipeline
+                                handle_input(&mut app_state, &mut ui_state, &ollama_client, &input);
+                            }
                         }
                     }
                     // Backspace
@@ -193,7 +238,6 @@ fn handle_input(
     client: &ollama::OllamaClient,
     input: &str,
 ) {
-    // Use a simple synchronous approach for now (streaming will use tokio spawn in future)
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -201,11 +245,6 @@ fn handle_input(
             return;
         }
     };
-
-    let messages = vec![
-        ollama::chat::ChatMessage::system(agent::prompts::CODING_SYSTEM),
-        ollama::chat::ChatMessage::user(input),
-    ];
 
     let model = &app_state.config.core_model;
     if model.is_empty() {
@@ -215,12 +254,130 @@ fn handle_input(
         return;
     }
 
-    match rt.block_on(client.chat(model, messages)) {
-        Ok(response) => {
-            ui_state.add_output(OutputLine::Assistant(response.content));
+    // Detect if this looks like a code implementation request
+    let kind = if looks_like_code_request(input) {
+        agent::retry::ResponseKind::CodeImplementation
+    } else {
+        agent::retry::ResponseKind::Chat
+    };
+
+    let max_retries = app_state.config.max_retries;
+
+    let result = rt.block_on(agent::retry::chat_with_retry(
+        client,
+        model,
+        agent::prompts::CODING_SYSTEM,
+        input,
+        kind,
+        max_retries,
+    ));
+
+    match result {
+        agent::retry::RetryResult::Success { content, attempts } => {
+            if attempts > 0 {
+                ui_state.add_output(OutputLine::System(
+                    format!("Got valid response after {} retries", attempts),
+                ));
+            }
+            ui_state.add_output(OutputLine::Assistant(content));
         }
-        Err(e) => {
-            ui_state.add_output(OutputLine::Error(format!("Ollama error: {}", e)));
+        agent::retry::RetryResult::Exhausted { content, attempts, corrections } => {
+            ui_state.add_output(OutputLine::Error(
+                format!("Response still invalid after {} retries. Showing last attempt:", attempts),
+            ));
+            for (_, reason) in &corrections {
+                ui_state.add_output(OutputLine::Error(format!("  - {}", reason)));
+            }
+            ui_state.add_output(OutputLine::Assistant(content));
+        }
+        agent::retry::RetryResult::Failed { last_error, .. } => {
+            ui_state.add_output(OutputLine::Error(last_error));
         }
     }
+}
+
+fn handle_skill_input(
+    app_state: &mut AppState,
+    ui_state: &mut ui::UiState,
+    client: &ollama::OllamaClient,
+    skill: &skills::Skill,
+    args: &str,
+) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            ui_state.add_output(OutputLine::Error(format!("Runtime error: {}", e)));
+            return;
+        }
+    };
+
+    let model = &app_state.config.core_model;
+    if model.is_empty() {
+        ui_state.add_output(OutputLine::Error(
+            "No core model configured. Run setup or edit ~/.litecode/config.toml".into(),
+        ));
+        return;
+    }
+
+    let user_message = if args.is_empty() {
+        ui_state.add_output(OutputLine::Error(
+            format!("Usage: /{} <question or description>", skill.name),
+        ));
+        return;
+    } else {
+        args.to_string()
+    };
+
+    let system_prompt = format!("{}\n\n{}", agent::prompts::CODING_SYSTEM, skill.content);
+    let max_retries = app_state.config.max_retries;
+
+    // Skills generally produce chat-style output; code skills get code validation
+    let kind = if skill.name == "simplify" || skill.name == "review" || skill.name == "test" {
+        agent::retry::ResponseKind::CodeImplementation
+    } else {
+        agent::retry::ResponseKind::Chat
+    };
+
+    let result = rt.block_on(agent::retry::chat_with_retry(
+        client,
+        model,
+        &system_prompt,
+        &user_message,
+        kind,
+        max_retries,
+    ));
+
+    match result {
+        agent::retry::RetryResult::Success { content, attempts } => {
+            if attempts > 0 {
+                ui_state.add_output(OutputLine::System(
+                    format!("Got valid response after {} retries", attempts),
+                ));
+            }
+            ui_state.add_output(OutputLine::Assistant(content));
+        }
+        agent::retry::RetryResult::Exhausted { content, attempts, corrections } => {
+            ui_state.add_output(OutputLine::Error(
+                format!("Response still invalid after {} retries. Showing last attempt:", attempts),
+            ));
+            for (_, reason) in &corrections {
+                ui_state.add_output(OutputLine::Error(format!("  - {}", reason)));
+            }
+            ui_state.add_output(OutputLine::Assistant(content));
+        }
+        agent::retry::RetryResult::Failed { last_error, .. } => {
+            ui_state.add_output(OutputLine::Error(last_error));
+        }
+    }
+}
+
+/// Heuristic: does this user input look like it's asking for code generation?
+fn looks_like_code_request(input: &str) -> bool {
+    let lower = input.to_lowercase();
+    let code_keywords = [
+        "implement", "create", "write", "build", "add", "refactor",
+        "generate", "fix", "modify", "change", "update", "make a",
+        "code", "function", "class", "module", "file",
+    ];
+    code_keywords.iter().any(|k| lower.contains(k))
 }

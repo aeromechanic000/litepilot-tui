@@ -4,6 +4,7 @@ use crate::config::Config;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+#[allow(dead_code)]
 pub struct SearchEngine {
     http: reqwest::Client,
     cache: cache::SearchCache,
@@ -11,6 +12,7 @@ pub struct SearchEngine {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[allow(dead_code)]
 pub struct SearchResult {
     pub title: String,
     pub url: String,
@@ -18,6 +20,7 @@ pub struct SearchResult {
     pub body: String,
 }
 
+#[allow(dead_code)]
 impl SearchEngine {
     pub fn new(config: &Config) -> Self {
         let cache_dir = Config::cache_dir()
@@ -137,6 +140,7 @@ impl SearchEngine {
 }
 
 // Simple URL encoding (avoid adding another dependency)
+#[allow(dead_code)]
 mod urlencoding {
     pub fn encode(s: &str) -> String {
         s.chars()

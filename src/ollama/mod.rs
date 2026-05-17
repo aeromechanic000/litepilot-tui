@@ -8,6 +8,7 @@ use std::time::Duration;
 
 pub struct OllamaClient {
     endpoint: String,
+    #[allow(dead_code)]
     timeout: Duration,
     http: Client,
 }
@@ -25,6 +26,7 @@ impl OllamaClient {
         })
     }
 
+    #[allow(dead_code)]
     pub fn endpoint(&self) -> &str {
         &self.endpoint
     }
@@ -44,6 +46,7 @@ impl OllamaClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn list_models(&self) -> Result<Vec<model::ModelInfo>> {
         let url = format!("{}/api/tags", self.endpoint);
         let resp = self

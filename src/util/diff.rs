@@ -1,12 +1,14 @@
 use similar::{ChangeTag, TextDiff};
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum DiffLine {
     Context(String),
     Added(String),
     Removed(String),
 }
 
+#[allow(dead_code)]
 pub fn generate_diff(old: &str, new: &str) -> Vec<DiffLine> {
     let diff = TextDiff::from_lines(old, new);
     let mut result = Vec::new();
@@ -22,6 +24,7 @@ pub fn generate_diff(old: &str, new: &str) -> Vec<DiffLine> {
     result
 }
 
+#[allow(dead_code)]
 pub fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut output = format!("--- {}\n+++ {}\n", file_path, file_path);
@@ -31,6 +34,7 @@ pub fn generate_unified_diff(old: &str, new: &str, file_path: &str) -> String {
     output
 }
 
+#[allow(dead_code)]
 pub fn apply_diff(original: &str, added_lines: &[String], removed_lines: &[String]) -> String {
     let mut lines: Vec<String> = original.lines().map(|l| l.to_string()).collect();
     for removed in removed_lines {

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileEntry {
     pub path: PathBuf,
     pub is_dir: bool,
@@ -12,11 +13,13 @@ pub struct FileEntry {
     pub name: String,
 }
 
+#[allow(dead_code)]
 pub struct ProjectContext {
     root: PathBuf,
     gitignore_patterns: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl ProjectContext {
     pub fn new(root: PathBuf) -> Self {
         let gitignore = Self::load_gitignore(&root);

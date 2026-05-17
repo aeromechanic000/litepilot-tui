@@ -1,5 +1,6 @@
 use crate::ollama::model::ModelSize;
 
+#[allow(dead_code)]
 pub const PLANNING_SYSTEM: &str = r#"You are a project planning assistant. Given a user request and project context:
 1. Analyze the requirements
 2. Break down into specific implementation steps
@@ -31,6 +32,7 @@ Rules:
 - Follow best practices for the language
 - Add minimal comments for non-obvious logic"#;
 
+#[allow(dead_code)]
 pub const AUDIT_SYSTEM: &str = r#"You are a code review assistant. Review the provided code changes for:
 1. Syntax errors
 2. Logic bugs
@@ -44,6 +46,7 @@ Output format:
 - Suggest fixes for each issue
 - If no issues, just output PASS"#;
 
+#[allow(dead_code)]
 pub fn system_prompt_for_size(size: &ModelSize) -> &'static str {
     match size {
         ModelSize::Small => SMALL_MODEL_SYSTEM,
@@ -68,6 +71,7 @@ const LARGE_MODEL_SYSTEM: &str = r#"You are an advanced coding assistant. Implem
 Use idiomatic patterns, proper error handling, and clean architecture.
 Output complete file contents for each change."#;
 
+#[allow(dead_code)]
 pub const TEMPLATE_SELECTION_SYSTEM: &str = r#"You select relevant code templates for a coding task.
 Given a numbered catalog and a user request, output ONLY the indices of the most relevant templates, comma-separated.
 Consider: language/framework match, task type, code patterns.

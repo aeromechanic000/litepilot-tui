@@ -24,14 +24,18 @@ pub enum OutputLine {
     Assistant(String),
     System(String),
     Error(String),
+    #[allow(dead_code)]
     Code { language: String, code: String },
+    #[allow(dead_code)]
     Diff { added: Vec<String>, removed: Vec<String> },
+    #[allow(dead_code)]
     Thinking(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SidebarTab {
     ProjectFiles,
+    #[allow(dead_code)]
     CodeBase,
 }
 
@@ -54,6 +58,7 @@ impl UiState {
         self.output_lines.push(line);
     }
 
+    #[allow(dead_code)]
     pub fn clear_output(&mut self) {
         self.output_lines.clear();
         self.scroll_offset = 0;
@@ -131,7 +136,7 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
     ];
 
     let status = Paragraph::new(Line::from(spans))
-        .style(Style::default().bg(theme.bg_main));
+        .style(Style::default().fg(theme.text).bg(theme.bg_main));
     f.render_widget(status, area);
 }
 
@@ -198,8 +203,13 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
         }
     }).collect();
 
+    // Clear main area background first
+    let clear = Block::default()
+        .style(Style::default().bg(theme.bg_main));
+    f.render_widget(clear, main_area);
+
     let output = Paragraph::new(lines)
-        .block(Block::default().style(Style::default().bg(theme.bg_main)))
+        .style(Style::default().fg(theme.text).bg(theme.bg_main))
         .wrap(Wrap { trim: false })
         .scroll((ui.scroll_offset, 0));
     f.render_widget(output, main_area);
@@ -210,11 +220,16 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
             SidebarTab::ProjectFiles => "Project Files",
             SidebarTab::CodeBase => "Code Base",
         };
+        // Clear the entire sidebar area first to prevent leftover colors
+        let clear = Block::default()
+            .style(Style::default().fg(theme.text).bg(theme.bg_sidebar));
+        f.render_widget(clear, sidebar_area);
+        // Then render the content on top
         let sidebar = Paragraph::new(tab_indicator)
+            .style(Style::default().fg(theme.text).bg(theme.bg_sidebar))
             .block(Block::default()
                 .borders(Borders::LEFT)
                 .border_style(Style::default().fg(theme.secondary))
-                .style(Style::default().bg(theme.bg_sidebar))
             );
         f.render_widget(sidebar, sidebar_area);
     }
@@ -223,10 +238,10 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
 fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect) {
     let theme = &ui.theme;
     let input = Paragraph::new(ui.input_text.as_str())
+        .style(Style::default().fg(theme.text).bg(theme.bg_main))
         .block(Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(theme.secondary))
-            .style(Style::default().bg(theme.bg_main))
             .title(Span::styled(
                 " Shift+Tab:mode | Enter:send | Ctrl+S:search | Ctrl+C:quit ",
                 Style::default().fg(theme.text),

@@ -1,8 +1,10 @@
+#[allow(dead_code)]
 pub fn estimate_tokens(text: &str) -> usize {
     // Rough estimate: ~4 chars per token for English/code
     (text.chars().count() + 3) / 4
 }
 
+#[allow(dead_code)]
 pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> &str {
     let max_chars = max_tokens * 4;
     if text.len() <= max_chars {
@@ -16,6 +18,7 @@ pub fn truncate_to_tokens(text: &str, max_tokens: usize) -> &str {
     &text[..end]
 }
 
+#[allow(dead_code)]
 pub fn truncate_lines(text: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() <= max_lines {

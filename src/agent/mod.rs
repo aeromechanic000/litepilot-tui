@@ -3,6 +3,7 @@ pub mod editor;
 pub mod auto_run;
 pub mod syntax;
 pub mod prompts;
+pub mod retry;
 
 use crate::ollama::chat::ChatMessage;
 use crate::ollama::OllamaClient;
@@ -13,6 +14,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Plan {
     pub analysis: String,
     pub steps: Vec<String>,
@@ -21,6 +23,7 @@ pub struct Plan {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileChange {
     pub path: PathBuf,
     pub content: String,
@@ -28,12 +31,14 @@ pub struct FileChange {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AuditResult {
     pub passed: bool,
     pub issues: Vec<String>,
     pub fixes: Vec<FileChange>,
 }
 
+#[allow(dead_code)]
 pub struct AgentPipeline<'a> {
     client: &'a OllamaClient,
     config: &'a Config,
@@ -41,6 +46,7 @@ pub struct AgentPipeline<'a> {
     workspace: PathBuf,
 }
 
+#[allow(dead_code)]
 impl<'a> AgentPipeline<'a> {
     pub fn new(
         client: &'a OllamaClient,

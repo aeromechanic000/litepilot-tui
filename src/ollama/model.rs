@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ModelSize {
     Small,
     Medium,
@@ -19,6 +20,7 @@ impl fmt::Display for ModelSize {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ModelInfo {
     pub name: String,
     pub size: u64,
@@ -30,6 +32,7 @@ pub struct ModelInfo {
 }
 
 /// Extract approximate parameter count from model name (e.g., "qwen3:4b" → 4)
+#[allow(dead_code)]
 pub fn estimate_parameters(name: &str) -> u64 {
     let lower = name.to_lowercase();
     // Try patterns like ":4b", ":14b", ":32b", ":0.5b"
@@ -43,6 +46,7 @@ pub fn estimate_parameters(name: &str) -> u64 {
     0
 }
 
+#[allow(dead_code)]
 pub fn classify_model(parameter_count: u64) -> ModelSize {
     match parameter_count {
         0..=5 => ModelSize::Small,
@@ -51,6 +55,7 @@ pub fn classify_model(parameter_count: u64) -> ModelSize {
     }
 }
 
+#[allow(dead_code)]
 pub fn estimate_context_window(name: &str) -> u64 {
     let params = estimate_parameters(name);
     match params {

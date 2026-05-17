@@ -3,8 +3,10 @@ use crate::sandbox::Sandbox;
 use anyhow::{Context, Result};
 use std::path::Path;
 
+#[allow(dead_code)]
 pub struct UvManager;
 
+#[allow(dead_code)]
 impl UvManager {
     pub async fn init(project_dir: &Path, sandbox: &Sandbox) -> Result<CommandOutput> {
         let executor = Executor::new(sandbox);

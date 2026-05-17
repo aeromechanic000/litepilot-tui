@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::skills::SkillRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -28,14 +29,17 @@ impl AppMode {
         }
     }
 
+    #[allow(dead_code)]
     pub fn can_write_file(self) -> bool {
         !matches!(self, AppMode::Plan)
     }
 
+    #[allow(dead_code)]
     pub fn can_execute_command(self) -> bool {
         !matches!(self, AppMode::Plan)
     }
 
+    #[allow(dead_code)]
     pub fn needs_confirmation(self) -> bool {
         matches!(self, AppMode::Edit)
     }
@@ -54,11 +58,14 @@ pub struct AppState {
     pub config: Config,
     pub workspace: PathBuf,
     pub web_search_enabled: bool,
+    #[allow(dead_code)]
     pub pending_confirmations: Vec<PendingAction>,
     pub input_history: Vec<String>,
+    pub skills: SkillRegistry,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum PendingAction {
     WriteFile { path: PathBuf, content: String, diff_preview: String },
     DeleteFile { path: PathBuf },
@@ -68,6 +75,11 @@ pub enum PendingAction {
 impl AppState {
     pub fn new(config: Config, workspace: PathBuf) -> Self {
         let mode = AppMode::from_str_lossy(&config.default_mode);
+
+        let skills = Config::skills_dir()
+            .map(|dir| SkillRegistry::load_from_dir(&dir))
+            .unwrap_or_else(|_| SkillRegistry::empty());
+
         Self {
             mode,
             config: config.clone(),
@@ -75,6 +87,7 @@ impl AppState {
             web_search_enabled: config.enable_free_web_search,
             pending_confirmations: Vec::new(),
             input_history: Vec::new(),
+            skills,
         }
     }
 
@@ -83,14 +96,17 @@ impl AppState {
         self.mode
     }
 
+    #[allow(dead_code)]
     pub fn push_pending(&mut self, action: PendingAction) {
         self.pending_confirmations.push(action);
     }
 
+    #[allow(dead_code)]
     pub fn pop_pending(&mut self) -> Option<PendingAction> {
         self.pending_confirmations.pop()
     }
 
+    #[allow(dead_code)]
     pub fn clear_pending(&mut self) {
         self.pending_confirmations.clear();
     }

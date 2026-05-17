@@ -3,6 +3,7 @@ use crate::ollama::chat::ChatMessage;
 use crate::ollama::OllamaClient;
 use anyhow::Result;
 
+#[allow(dead_code)]
 pub async fn run_implementation(
     client: &OllamaClient,
     model: &str,

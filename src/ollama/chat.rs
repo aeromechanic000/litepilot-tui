@@ -19,6 +19,7 @@ struct ChatRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ChatChunk {
     pub content: String,
     pub done: bool,
@@ -28,6 +29,7 @@ pub struct ChatChunk {
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
     pub content: String,
+    #[allow(dead_code)]
     pub model: String,
 }
 
@@ -40,6 +42,7 @@ impl ChatMessage {
         Self { role: "user".into(), content: content.into() }
     }
 
+    #[allow(dead_code)]
     pub fn assistant(content: impl Into<String>) -> Self {
         Self { role: "assistant".into(), content: content.into() }
     }
@@ -84,6 +87,7 @@ impl OllamaClient {
         Ok(ChatResponse { content, model: resp_model })
     }
 
+    #[allow(dead_code)]
     pub fn chat_stream(
         http: reqwest::Client,
         endpoint: String,

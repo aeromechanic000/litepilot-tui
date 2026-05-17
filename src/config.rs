@@ -23,6 +23,7 @@ pub struct Config {
     pub max_search_context_tokens: usize,
     pub max_template_context_tokens: usize,
     pub template_max_select: usize,
+    pub max_retries: usize,
 }
 
 impl Default for Config {
@@ -45,6 +46,7 @@ impl Default for Config {
             max_search_context_tokens: 2048,
             max_template_context_tokens: 2048,
             template_max_select: 5,
+            max_retries: 3,
         }
     }
 }
@@ -74,6 +76,7 @@ impl Config {
         Ok(Self::config_dir()?.join("config.toml"))
     }
 
+    #[allow(dead_code)]
     pub fn ensure_dirs() -> Result<PathBuf> {
         let dir = Self::config_dir()?;
         Self::create_dir_structure(&dir)?;
@@ -90,11 +93,15 @@ impl Config {
         let code_base = dir.join("code_base");
         crate::codebase::builtin::populate_codebase(&code_base)?;
 
+        // Always populate skills in global ~/.litecode/skills/
+        let global_dir = Self::config_dir()?;
+        let _ = crate::skills::builtin::populate_skills(&global_dir.join("skills"));
+
         Ok(dir)
     }
 
     fn create_dir_structure(dir: &Path) -> Result<()> {
-        for sub in &["sessions", "cache", "code_base"] {
+        for sub in &["sessions", "cache", "code_base", "skills"] {
             std::fs::create_dir_all(dir.join(sub))
                 .with_context(|| format!("Creating directory {}", sub))?;
         }
@@ -140,6 +147,7 @@ impl Config {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn exists() -> bool {
         Self::config_path().map(|p| p.exists()).unwrap_or(false)
     }
@@ -155,17 +163,24 @@ impl Config {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn code_base_dir(&self) -> PathBuf {
         let expanded = shellexpand::tilde(&self.code_base_path).to_string();
         PathBuf::from(expanded)
     }
 
+    #[allow(dead_code)]
     pub fn cache_dir() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("cache"))
     }
 
+    #[allow(dead_code)]
     pub fn sessions_dir() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("sessions"))
+    }
+
+    pub fn skills_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("skills"))
     }
 
     pub fn effective_fast_model(&self) -> &str {
@@ -266,7 +281,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let base = dir.path().join(".litecode");
         // Monkey-patch: just verify the subdirectories would be created
-        for sub in &["sessions", "cache", "code_base"] {
+        for sub in &["sessions", "cache", "code_base", "skills"] {
             std::fs::create_dir_all(base.join(sub)).unwrap();
         }
         assert!(base.join("sessions").exists());

@@ -4,10 +4,12 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
+#[allow(dead_code)]
 fn sessions_dir() -> Result<PathBuf> {
     Config::sessions_dir()
 }
 
+#[allow(dead_code)]
 pub fn save_session(session: &Session) -> Result<()> {
     let dir = sessions_dir()?;
     fs::create_dir_all(&dir)?;
@@ -21,6 +23,7 @@ pub fn save_session(session: &Session) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 pub fn load_session(id: &str) -> Result<Session> {
     let dir = sessions_dir()?;
     let path = dir.join(format!("{}.json", id));
@@ -31,6 +34,7 @@ pub fn load_session(id: &str) -> Result<Session> {
     Ok(session)
 }
 
+#[allow(dead_code)]
 pub fn list_sessions() -> Result<Vec<SessionMeta>> {
     let dir = sessions_dir()?;
     if !dir.exists() {
@@ -55,6 +59,7 @@ pub fn list_sessions() -> Result<Vec<SessionMeta>> {
     Ok(sessions)
 }
 
+#[allow(dead_code)]
 pub fn delete_session(id: &str) -> Result<()> {
     let dir = sessions_dir()?;
     let path = dir.join(format!("{}.json", id));

@@ -95,6 +95,7 @@ pub fn populate_codebase(base_dir: &Path) -> Result<(), std::io::Error> {
 }
 
 /// Count of built-in templates (for status display).
+#[allow(dead_code)]
 pub fn template_count() -> usize {
     all_templates().len()
 }

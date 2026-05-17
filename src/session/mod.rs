@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct Session {
     pub id: String,
     pub created_at: String,
@@ -13,6 +14,7 @@ pub struct Session {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SessionMessage {
     pub role: String,
     pub content: String,
@@ -20,6 +22,7 @@ pub struct SessionMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SessionMeta {
     pub id: String,
     pub created_at: String,
@@ -28,6 +31,7 @@ pub struct SessionMeta {
     pub preview: String,
 }
 
+#[allow(dead_code)]
 impl Session {
     pub fn new() -> Self {
         let now = chrono::Utc::now().to_rfc3339();

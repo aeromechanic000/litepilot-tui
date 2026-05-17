@@ -4,6 +4,7 @@ use anyhow::Result;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum SyntaxResult {
     Pass,
     Fail { errors: String },
@@ -11,6 +12,7 @@ pub enum SyntaxResult {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub enum Language {
     Python,
     JavaScript,
@@ -22,6 +24,7 @@ pub enum Language {
     Cpp,
 }
 
+#[allow(dead_code)]
 impl Language {
     pub fn check_command(&self) -> (&'static str, Vec<&'static str>) {
         match self {
@@ -51,8 +54,10 @@ impl Language {
     }
 }
 
+#[allow(dead_code)]
 pub struct SyntaxChecker;
 
+#[allow(dead_code)]
 impl SyntaxChecker {
     pub fn detect_language(path: &Path) -> Option<Language> {
         let ext = path.extension()?.to_str()?;

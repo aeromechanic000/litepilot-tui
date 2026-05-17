@@ -9,6 +9,7 @@ use crate::util::text::{estimate_tokens, truncate_to_tokens};
 use anyhow::Result;
 
 /// Templates loaded and formatted for inclusion in agent prompts.
+#[allow(dead_code)]
 pub struct LoadedTemplates {
     /// Formatted template strings ready for prompt injection.
     pub refs: Vec<String>,
@@ -20,6 +21,7 @@ pub struct LoadedTemplates {
 
 /// Build a compact pipe-delimited catalog from all templates.
 /// Format: `index|name|lang|tags|description` (one line per template).
+#[allow(dead_code)]
 pub fn build_catalog(templates: &[Template]) -> String {
     let mut lines = Vec::with_capacity(templates.len());
     for (i, t) in templates.iter().enumerate() {
@@ -39,6 +41,7 @@ pub fn build_catalog(templates: &[Template]) -> String {
 
 /// Parse the LLM's selection response into a list of valid template indices.
 /// Extracts all numbers from the response and filters to valid range.
+#[allow(dead_code)]
 fn parse_selection(response: &str, total_templates: usize, max_select: usize) -> Vec<usize> {
     let mut indices: Vec<usize> = response
         .split(|c: char| !c.is_ascii_digit())
@@ -63,6 +66,7 @@ fn parse_selection(response: &str, total_templates: usize, max_select: usize) ->
 }
 
 /// Use the core model to select relevant template indices from the catalog.
+#[allow(dead_code)]
 async fn select(
     client: &OllamaClient,
     core_model: &str,
@@ -90,6 +94,7 @@ async fn select(
 
 /// Load selected template content, respecting the token budget.
 /// Returns formatted ref strings in selection order.
+#[allow(dead_code)]
 pub fn load_within_budget(
     templates: &[Template],
     indices: &[usize],
@@ -120,6 +125,7 @@ pub fn load_within_budget(
 }
 
 /// Truncate project context to a limited number of lines for the selection call.
+#[allow(dead_code)]
 fn truncate_project_context(ctx: &str, max_lines: usize) -> String {
     let lines: Vec<&str> = ctx.lines().take(max_lines).collect();
     if ctx.lines().count() > max_lines {
@@ -130,6 +136,7 @@ fn truncate_project_context(ctx: &str, max_lines: usize) -> String {
 }
 
 /// Full two-pass retrieval: select via LLM, then load content within budget.
+#[allow(dead_code)]
 pub async fn retrieve(
     client: &OllamaClient,
     config: &Config,

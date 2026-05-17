@@ -4,12 +4,14 @@ use crate::util::diff::generate_unified_diff;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code)]
 pub struct FileOps<'a> {
     sandbox: &'a Sandbox,
     mode: AppMode,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FileChange {
     pub path: PathBuf,
     pub action: FileAction,
@@ -17,12 +19,14 @@ pub struct FileChange {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum FileAction {
     Create { content: String },
     Modify { old_content: String, new_content: String },
     Delete,
 }
 
+#[allow(dead_code)]
 impl<'a> FileOps<'a> {
     pub fn new(sandbox: &'a Sandbox, mode: AppMode) -> Self {
         Self { sandbox, mode }

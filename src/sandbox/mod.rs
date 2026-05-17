@@ -3,6 +3,7 @@ pub mod executor;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+#[allow(dead_code)]
 const BLOCKED_COMMANDS: &[&str] = &[
     "sudo", "su", "mkfs", "dd", "format", "chmod", "chown",
     "systemctl", "service", "launchctl",
@@ -12,6 +13,7 @@ const BLOCKED_COMMANDS: &[&str] = &[
     "tee", "crontab",
 ];
 
+#[allow(dead_code)]
 const ALLOWED_COMMANDS: &[&str] = &[
     "cargo", "rustc", "rustup",
     "python", "python3", "uv", "pip", "pip3",
@@ -27,12 +29,14 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "pytest", "jest", "vitest",
 ];
 
+#[allow(dead_code)]
 pub struct Sandbox {
     workspace: PathBuf,
     allowed: HashSet<String>,
     blocked: HashSet<String>,
 }
 
+#[allow(dead_code)]
 impl Sandbox {
     pub fn new(workspace: PathBuf) -> Self {
         let allowed: HashSet<String> = ALLOWED_COMMANDS.iter().map(|s| s.to_string()).collect();
@@ -97,6 +101,7 @@ impl Sandbox {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum SandboxError {
     #[error("Path outside workspace: {} (workspace: {})", .path.display(), .workspace.display())]
     PathOutsideWorkspace { path: PathBuf, workspace: PathBuf },

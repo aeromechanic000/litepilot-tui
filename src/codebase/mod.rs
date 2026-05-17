@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct Template {
     pub name: String,
     pub path: String,
@@ -15,11 +16,13 @@ pub struct Template {
     pub content: String,
 }
 
+#[allow(dead_code)]
 pub struct CodeBase {
     templates: Vec<Template>,
     base_dir: PathBuf,
 }
 
+#[allow(dead_code)]
 impl CodeBase {
     pub fn new(base_dir: PathBuf) -> Self {
         let mut cb = Self {

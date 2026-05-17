@@ -3,6 +3,7 @@ use regex::Regex;
 use std::fs;
 use std::path::Path;
 
+#[allow(dead_code)]
 pub fn scan_directory(dir: &Path) -> Result<Vec<Template>, std::io::Error> {
     let mut templates = Vec::new();
     if !dir.exists() {
@@ -33,6 +34,7 @@ pub fn scan_directory(dir: &Path) -> Result<Vec<Template>, std::io::Error> {
     Ok(templates)
 }
 
+#[allow(dead_code)]
 fn parse_template(content: String, path: &Path, base_dir: &Path) -> Option<Template> {
     let desc_re = Regex::new(r"(?:#|//|<!--|--)\s*@LITE_DESC:\s*(.+)").ok()?;
     let scene_re = Regex::new(r"(?:#|//|<!--|--)\s*@LITE_SCENE:\s*(.+)").ok()?;
