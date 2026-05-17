@@ -183,6 +183,12 @@ impl Config {
         Ok(Self::config_dir()?.join("skills"))
     }
 
+    /// Returns true when the config needs first-run setup (core model not configured).
+    #[allow(dead_code)]
+    pub fn needs_setup(&self) -> bool {
+        self.core_model.is_empty()
+    }
+
     pub fn effective_fast_model(&self) -> &str {
         if self.fast_model.is_empty() {
             &self.core_model

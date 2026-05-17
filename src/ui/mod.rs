@@ -229,7 +229,7 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
             .style(Style::default().fg(theme.text).bg(theme.bg_sidebar))
             .block(Block::default()
                 .borders(Borders::LEFT)
-                .border_style(Style::default().fg(theme.secondary))
+                .border_style(Style::default().fg(theme.primary))
             );
         f.render_widget(sidebar, sidebar_area);
     }

@@ -1,0 +1,795 @@
+use crate::config::Config;
+use crate::ollama;
+use crate::ollama::model::ModelInfo;
+use crate::ui::theme::Theme;
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Alignment, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::Terminal;
+use std::io;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WizardStep {
+    UrlInput,
+    Connecting,
+    ModelSelect,
+    Confirm,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ModelSlot {
+    Fast,
+    Core,
+    Audit,
+}
+
+impl ModelSlot {
+    fn label(&self) -> &'static str {
+        match self {
+            ModelSlot::Fast => "Fast (3-5B)",
+            ModelSlot::Core => "Core (6-7B)",
+            ModelSlot::Audit => "Audit (7-14B)",
+        }
+    }
+
+    fn description(&self) -> &'static str {
+        match self {
+            ModelSlot::Fast => "Quick planning & routing",
+            ModelSlot::Core => "Main coding assistant",
+            ModelSlot::Audit => "Code review & quality",
+        }
+    }
+
+    fn recommended_size(&self) -> &'static str {
+        match self {
+            ModelSlot::Fast => "Small",
+            ModelSlot::Core => "Medium",
+            ModelSlot::Audit => "Medium",
+        }
+    }
+
+    fn next(self) -> Option<Self> {
+        match self {
+            ModelSlot::Fast => Some(ModelSlot::Core),
+            ModelSlot::Core => Some(ModelSlot::Audit),
+            ModelSlot::Audit => None,
+        }
+    }
+}
+
+struct WizardState {
+    step: WizardStep,
+    url: String,
+    input_text: String,
+    input_cursor: usize,
+    models: Vec<ModelInfo>,
+    selected_index: usize,
+    scroll_offset: usize,
+    current_slot: ModelSlot,
+    fast_model: Option<String>,
+    core_model: Option<String>,
+    audit_model: Option<String>,
+    error_msg: Option<String>,
+}
+
+impl WizardState {
+    fn new(existing_config: &Config) -> Self {
+        let url = if existing_config.ollama_endpoint.is_empty() {
+            "http://127.0.0.1:11434".to_string()
+        } else {
+            existing_config.ollama_endpoint.clone()
+        };
+        let mut state = Self {
+            step: WizardStep::UrlInput,
+            url: url.clone(),
+            input_text: url.clone(),
+            input_cursor: url.len(),
+            models: Vec::new(),
+            selected_index: 0,
+            scroll_offset: 0,
+            current_slot: ModelSlot::Fast,
+            fast_model: None,
+            core_model: None,
+            audit_model: None,
+            error_msg: None,
+        };
+        // Pre-fill from existing config if present
+        if !existing_config.fast_model.is_empty() {
+            state.fast_model = Some(existing_config.fast_model.clone());
+        }
+        if !existing_config.core_model.is_empty() {
+            state.core_model = Some(existing_config.core_model.clone());
+        }
+        if !existing_config.audit_model.is_empty() {
+            state.audit_model = Some(existing_config.audit_model.clone());
+        }
+        state
+    }
+
+    fn push_char(&mut self, c: char) {
+        self.input_text.insert(self.input_cursor, c);
+        self.input_cursor += c.len_utf8();
+    }
+
+    fn backspace(&mut self) {
+        if self.input_cursor > 0 {
+            let prev = self.input_text[..self.input_cursor]
+                .chars()
+                .last()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            self.input_cursor -= prev;
+            self.input_text.remove(self.input_cursor);
+        }
+    }
+
+    /// Position selected_index on the model already chosen for the current slot
+    fn jump_to_existing_model(&mut self) {
+        let existing = match self.current_slot {
+            ModelSlot::Fast => self.fast_model.as_deref(),
+            ModelSlot::Core => self.core_model.as_deref(),
+            ModelSlot::Audit => self.audit_model.as_deref(),
+        };
+        if let Some(name) = existing {
+            if let Some(idx) = self.models.iter().position(|m| m.name == name) {
+                self.selected_index = idx;
+                // Adjust scroll so selected item is visible
+                let visible = 10; // approximate visible items
+                if idx < self.scroll_offset {
+                    self.scroll_offset = idx;
+                } else if idx >= self.scroll_offset + visible {
+                    self.scroll_offset = idx.saturating_sub(visible / 2);
+                }
+            }
+        }
+    }
+
+    fn selected_model_for_slot(&self, slot: ModelSlot) -> &Option<String> {
+        match slot {
+            ModelSlot::Fast => &self.fast_model,
+            ModelSlot::Core => &self.core_model,
+            ModelSlot::Audit => &self.audit_model,
+        }
+    }
+
+    fn set_model_for_slot(&mut self, slot: ModelSlot, name: String) {
+        match slot {
+            ModelSlot::Fast => self.fast_model = Some(name),
+            ModelSlot::Core => self.core_model = Some(name),
+            ModelSlot::Audit => self.audit_model = Some(name),
+        }
+    }
+
+    fn step_number(&self) -> usize {
+        match self.step {
+            WizardStep::UrlInput => 1,
+            WizardStep::Connecting => 2,
+            WizardStep::ModelSelect => 3,
+            WizardStep::Confirm => 4,
+        }
+    }
+
+    fn into_config(self, base: &Config) -> Config {
+        Config {
+            ollama_endpoint: self.url,
+            fast_model: self.fast_model.unwrap_or_default(),
+            core_model: self.core_model.unwrap_or_default(),
+            audit_model: self.audit_model.unwrap_or_default(),
+            ..base.clone()
+        }
+    }
+}
+
+/// Run the setup wizard. Returns the updated config.
+pub fn run(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    config: Config,
+    workspace: &std::path::Path,
+) -> Result<Config> {
+    let mut state = WizardState::new(&config);
+    let theme = Theme::detect();
+
+    loop {
+        terminal.draw(|f| draw_wizard(f, &state, &theme))?;
+
+        if event::poll(std::time::Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                match handle_key(&mut state, key.modifiers, key.code) {
+                    Action::Continue => {}
+                    Action::Save => {
+                        let new_config = state.into_config(&config);
+                        let config_path = Config::config_path_for(workspace);
+                        new_config.save(&config_path)?;
+                        return Ok(new_config);
+                    }
+                    Action::Quit => {
+                        return Ok(config);
+                    }
+                }
+            }
+        }
+    }
+}
+
+enum Action {
+    Continue,
+    Save,
+    Quit,
+}
+
+fn handle_key(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -> Action {
+    match state.step {
+        WizardStep::UrlInput => handle_url_input(state, modifiers, code),
+        WizardStep::Connecting => Action::Continue,
+        WizardStep::ModelSelect => handle_model_select(state, modifiers, code),
+        WizardStep::Confirm => handle_confirm(state, modifiers, code),
+    }
+}
+
+fn handle_url_input(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -> Action {
+    match (modifiers, code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            let url = if state.input_text.is_empty() {
+                "http://127.0.0.1:11434".to_string()
+            } else {
+                state.input_text.clone()
+            };
+            state.url = url.clone();
+            state.error_msg = None;
+            state.step = WizardStep::Connecting;
+
+            // Try to connect and fetch models
+            let result: Result<Vec<ModelInfo>> = std::thread::spawn(move || {
+                let rt = tokio::runtime::Runtime::new()?;
+                rt.block_on(async {
+                    let temp_config = Config {
+                        ollama_endpoint: url,
+                        connect_timeout: 10,
+                        ..Config::default()
+                    };
+                    let client = ollama::OllamaClient::new(&temp_config)?;
+                    client.ping().await?;
+                    client.list_models().await
+                })
+            })
+            .join()
+            .unwrap_or(Err(anyhow::anyhow!("Thread panicked")));
+
+            match result {
+                Ok(models) => {
+                    if models.is_empty() {
+                        state.error_msg = Some(
+                            "No models found. Pull models with: ollama pull <model>".into(),
+                        );
+                        state.step = WizardStep::ModelSelect;
+                    } else {
+                        state.models = models;
+                        state.selected_index = 0;
+                        state.scroll_offset = 0;
+                        state.current_slot = ModelSlot::Fast;
+                        // Pre-position on the existing model for the first slot
+                        state.jump_to_existing_model();
+                        // If all models already selected from config, skip to confirm
+                        if state.fast_model.is_some()
+                            && state.core_model.is_some()
+                            && state.audit_model.is_some()
+                        {
+                            state.step = WizardStep::Confirm;
+                        } else {
+                            state.step = WizardStep::ModelSelect;
+                        }
+                    }
+                }
+                Err(e) => {
+                    state.error_msg = Some(format!("Connection failed: {}", e));
+                    state.step = WizardStep::UrlInput;
+                }
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Backspace) => {
+            state.backspace();
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Char(c)) => {
+            state.push_char(c);
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Left) => {
+            if state.input_cursor > 0 {
+                state.input_cursor -= 1;
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Right) => {
+            if state.input_cursor < state.input_text.len() {
+                state.input_cursor += 1;
+            }
+            Action::Continue
+        }
+        _ => Action::Continue,
+    }
+}
+
+fn handle_model_select(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -> Action {
+    match (modifiers, code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
+        (KeyModifiers::NONE, KeyCode::Up) => {
+            if state.selected_index > 0 {
+                state.selected_index -= 1;
+                if state.selected_index < state.scroll_offset {
+                    state.scroll_offset = state.selected_index;
+                }
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Down) => {
+            if !state.models.is_empty() && state.selected_index < state.models.len() - 1 {
+                state.selected_index += 1;
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            if state.models.is_empty() {
+                // Manual input mode — use typed text as model name
+                let name = state.input_text.trim().to_string();
+                if !name.is_empty() {
+                    state.set_model_for_slot(state.current_slot, name);
+                    state.input_text.clear();
+                    state.input_cursor = 0;
+                }
+            } else {
+                let name = state.models[state.selected_index].name.clone();
+                state.set_model_for_slot(state.current_slot, name);
+            }
+            advance_slot(state)
+        }
+        (KeyModifiers::NONE, KeyCode::Tab) => {
+            // Skip this slot
+            advance_slot(state)
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            state.step = WizardStep::UrlInput;
+            state.error_msg = None;
+            Action::Continue
+        }
+        // Manual text input when no models
+        (KeyModifiers::NONE, KeyCode::Backspace) if state.models.is_empty() => {
+            state.backspace();
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Char(c)) if state.models.is_empty() => {
+            state.push_char(c);
+            Action::Continue
+        }
+        _ => Action::Continue,
+    }
+}
+
+fn advance_slot(state: &mut WizardState) -> Action {
+    match state.current_slot.next() {
+        Some(next) => {
+            state.current_slot = next;
+            state.selected_index = 0;
+            state.scroll_offset = 0;
+            state.jump_to_existing_model();
+            Action::Continue
+        }
+        None => {
+            state.step = WizardStep::Confirm;
+            Action::Continue
+        }
+    }
+}
+
+fn handle_confirm(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -> Action {
+    match (modifiers, code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            // Ensure at least core_model is set
+            if state.core_model.is_none() && !state.models.is_empty() {
+                state.core_model = Some(state.models[0].name.clone());
+            }
+            Action::Save
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            state.step = WizardStep::UrlInput;
+            state.error_msg = None;
+            Action::Continue
+        }
+        _ => Action::Continue,
+    }
+}
+
+fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
+    let size = f.area();
+
+    // Full-screen background
+    let bg = Block::default().style(Style::default().bg(theme.bg_sidebar));
+    f.render_widget(bg, size);
+
+    // Centered content area
+    let content_width = std::cmp::min(size.width.saturating_sub(4), 64);
+    let content_height = std::cmp::min(size.height.saturating_sub(4), 30);
+    let x = (size.width.saturating_sub(content_width)) / 2;
+    let y = (size.height.saturating_sub(content_height)) / 2;
+    let area = Rect::new(x, y, content_width, content_height);
+
+    let step_label = format!("Step {}/4", state.step_number());
+    let title = format!(" LiteCode Setup — {} ", step_label);
+
+    let container = Block::default()
+        .title(Span::styled(
+            &title,
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme.primary))
+        .style(Style::default().bg(theme.bg_sidebar).fg(theme.text));
+    f.render_widget(container, area);
+
+    let inner = Rect::new(
+        area.x + 2,
+        area.y + 2,
+        area.width.saturating_sub(4),
+        area.height.saturating_sub(4),
+    );
+
+    match state.step {
+        WizardStep::UrlInput => draw_url_input(f, state, theme, inner),
+        WizardStep::Connecting => draw_connecting(f, state, theme, inner),
+        WizardStep::ModelSelect => draw_model_select(f, state, theme, inner),
+        WizardStep::Confirm => draw_confirm(f, state, theme, inner),
+    }
+}
+
+fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "LiteCode Setup",
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Confirm or edit your Ollama connection settings."),
+        Line::from("Press Enter to accept and continue."),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Ollama URL:",
+            Style::default().fg(theme.secondary),
+        )),
+    ];
+
+    if let Some(ref err) = state.error_msg {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!("  {}", err),
+            Style::default().fg(theme.error),
+        )));
+        lines.push(Line::from(""));
+    }
+
+    let content = Paragraph::new(lines).style(Style::default().fg(theme.text));
+    f.render_widget(content, area);
+
+    // Input field
+    let input_y = area.y + area.height.min(7) - 3;
+    let input_area = Rect::new(area.x, input_y, area.width, 3);
+    let input_display = format!(" {}_", &state.input_text);
+    let input = Paragraph::new(input_display).style(
+        Style::default()
+            .fg(theme.text)
+            .add_modifier(Modifier::BOLD),
+    );
+    f.render_widget(input, input_area);
+
+    // Help bar
+    let help_y = area.y + area.height - 1;
+    let help = Paragraph::new("Enter: connect  |  Ctrl+C: exit")
+        .style(Style::default().fg(theme.secondary));
+    f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
+}
+
+fn draw_connecting(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("Connecting to {}...", state.url),
+            Style::default().fg(theme.primary),
+        )),
+        Line::from(""),
+        Line::from("Please wait..."),
+    ];
+    let content = Paragraph::new(lines)
+        .style(Style::default().fg(theme.text))
+        .alignment(Alignment::Center);
+    f.render_widget(content, area);
+}
+
+fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
+    let max_visible = (area.height.saturating_sub(6)) as usize;
+
+    // Header
+    let header = vec![
+        Line::from(Span::styled(
+            format!("Select model for: {}", state.current_slot.label()),
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            state.current_slot.description(),
+            Style::default().fg(theme.secondary),
+        )),
+        Line::from(""),
+    ];
+
+    let header_para = Paragraph::new(header).style(Style::default().fg(theme.text));
+    f.render_widget(header_para, area);
+
+    let list_y = area.y + 3;
+    let list_height = area.height.saturating_sub(6);
+
+    if state.models.is_empty() {
+        // No models — show manual input
+        let no_model_lines = vec![
+            Line::from(Span::styled(
+                if let Some(ref err) = state.error_msg {
+                    format!("  {}", err)
+                } else {
+                    "  No models available.".into()
+                },
+                Style::default().fg(theme.warning),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Type a model name and press Enter:",
+                Style::default().fg(theme.secondary),
+            )),
+        ];
+        let para = Paragraph::new(no_model_lines).style(Style::default().fg(theme.text));
+        f.render_widget(para, Rect::new(area.x, list_y, area.width, list_height));
+
+        // Input
+        let input_y = list_y + list_height.saturating_sub(3);
+        let input = Paragraph::new(format!(" {}_", state.input_text))
+            .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD));
+        f.render_widget(input, Rect::new(area.x, input_y, area.width, 1));
+    } else {
+        // Model list
+        let visible_end = std::cmp::min(
+            state.scroll_offset + max_visible,
+            state.models.len(),
+        );
+        let mut list_lines: Vec<Line> = Vec::new();
+
+        for (i, model) in state.models[state.scroll_offset..visible_end].iter().enumerate() {
+            let actual_idx = i + state.scroll_offset;
+            let is_selected = actual_idx == state.selected_index;
+
+            let indicator = if is_selected { " > " } else { "   " };
+            let size_info = format!(
+                "{:>8}  {}",
+                model.size_class.to_string(),
+                model.quantization_level
+            );
+            let family_info = if model.family.is_empty() {
+                String::new()
+            } else {
+                format!("  [{}]", model.family)
+            };
+
+            let recommended = state.current_slot.recommended_size();
+            let is_recommended = model.size_class.to_string().starts_with(recommended);
+
+            let style = if is_selected {
+                Style::default()
+                    .fg(theme.bg_sidebar)
+                    .bg(theme.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else if is_recommended {
+                Style::default()
+                    .fg(theme.primary)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text)
+            };
+
+            list_lines.push(Line::from(vec![
+                Span::styled(indicator, style),
+                Span::styled(format!("{:<24}", model.name), style),
+                Span::styled(format!("{}{}", size_info, family_info), style),
+            ]));
+        }
+
+        let list_para = Paragraph::new(list_lines);
+        f.render_widget(list_para, Rect::new(area.x, list_y, area.width, list_height));
+    }
+
+    // Already selected
+    let selected_y = area.y + area.height - 3;
+    let mut selected_lines = vec![Line::from(Span::styled(
+        "Selected:",
+        Style::default().fg(theme.secondary),
+    ))];
+    for slot in &[ModelSlot::Fast, ModelSlot::Core, ModelSlot::Audit] {
+        if let Some(ref name) = *state.selected_model_for_slot(*slot) {
+            let marker = if *slot == state.current_slot { ">" } else { " " };
+            selected_lines.push(Line::from(format!(
+                "  {} {}: {}",
+                marker,
+                slot.label(),
+                name
+            )));
+        } else if *slot == state.current_slot {
+            selected_lines.push(Line::from(format!(
+                "  > {}: (selecting...)",
+                slot.label()
+            )));
+        }
+    }
+    let sel_para = Paragraph::new(selected_lines).style(Style::default().fg(theme.text));
+    f.render_widget(sel_para, Rect::new(area.x, selected_y, area.width, 3));
+
+    // Help bar
+    let help_y = area.y + area.height - 1;
+    let help = Paragraph::new("Enter: select  |  Tab: skip  |  Esc: back")
+        .style(Style::default().fg(theme.secondary));
+    f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
+}
+
+fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Configuration Summary",
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("  Ollama URL: ", Style::default().fg(theme.secondary)),
+            Span::styled(&state.url, Style::default().fg(theme.text)),
+        ]),
+        Line::from(""),
+    ];
+
+    for (slot, model) in &[
+        (ModelSlot::Fast, &state.fast_model),
+        (ModelSlot::Core, &state.core_model),
+        (ModelSlot::Audit, &state.audit_model),
+    ] {
+        let model_display = model
+            .as_deref()
+            .unwrap_or("(not set — will use core model)");
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  {:>12}: ", slot.label()),
+                Style::default().fg(theme.secondary),
+            ),
+            Span::styled(model_display, Style::default().fg(theme.text)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter: confirm and start  |  Esc: go back and change",
+        Style::default().fg(theme.secondary),
+    )));
+
+    let content = Paragraph::new(lines).style(Style::default().fg(theme.text));
+    f.render_widget(content, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_slot_order() {
+        assert_eq!(ModelSlot::Fast.next(), Some(ModelSlot::Core));
+        assert_eq!(ModelSlot::Core.next(), Some(ModelSlot::Audit));
+        assert_eq!(ModelSlot::Audit.next(), None);
+    }
+
+    #[test]
+    fn model_slot_labels() {
+        assert!(ModelSlot::Fast.label().contains("Fast"));
+        assert!(ModelSlot::Core.label().contains("Core"));
+        assert!(ModelSlot::Audit.label().contains("Audit"));
+    }
+
+    #[test]
+    fn wizard_state_new_defaults() {
+        let config = Config::default();
+        let state = WizardState::new(&config);
+        assert_eq!(state.step, WizardStep::UrlInput);
+        assert_eq!(state.url, "http://127.0.0.1:11434");
+        assert_eq!(state.current_slot, ModelSlot::Fast);
+        assert!(state.fast_model.is_none());
+        assert!(state.core_model.is_none());
+        assert!(state.audit_model.is_none());
+    }
+
+    #[test]
+    fn wizard_state_presets_from_config() {
+        let config = Config {
+            ollama_endpoint: "http://custom:9999".into(),
+            fast_model: "qwen3:4b".into(),
+            core_model: "qwen3:8b".into(),
+            audit_model: "qwen3:14b".into(),
+            ..Config::default()
+        };
+        let state = WizardState::new(&config);
+        assert_eq!(state.url, "http://custom:9999");
+        assert_eq!(state.fast_model.as_deref(), Some("qwen3:4b"));
+        assert_eq!(state.core_model.as_deref(), Some("qwen3:8b"));
+        assert_eq!(state.audit_model.as_deref(), Some("qwen3:14b"));
+    }
+
+    #[test]
+    fn wizard_input_editing() {
+        let config = Config::default();
+        let mut state = WizardState::new(&config);
+        state.input_text.clear();
+        state.input_cursor = 0;
+        for c in "hello".chars() {
+            state.push_char(c);
+        }
+        assert_eq!(state.input_text, "hello");
+        assert_eq!(state.input_cursor, 5);
+        state.backspace();
+        assert_eq!(state.input_text, "hell");
+        assert_eq!(state.input_cursor, 4);
+    }
+
+    #[test]
+    fn set_model_for_slot() {
+        let config = Config::default();
+        let mut state = WizardState::new(&config);
+        state.set_model_for_slot(ModelSlot::Fast, "qwen3:4b".into());
+        assert_eq!(state.fast_model.as_deref(), Some("qwen3:4b"));
+        state.set_model_for_slot(ModelSlot::Core, "qwen3:8b".into());
+        assert_eq!(state.core_model.as_deref(), Some("qwen3:8b"));
+        state.set_model_for_slot(ModelSlot::Audit, "qwen3:14b".into());
+        assert_eq!(state.audit_model.as_deref(), Some("qwen3:14b"));
+    }
+
+    #[test]
+    fn into_config_applies_wizard_values() {
+        let config = Config::default();
+        let mut state = WizardState::new(&config);
+        state.url = "http://ollama:1234".into();
+        state.fast_model = Some("qwen3:4b".into());
+        state.core_model = Some("qwen3:8b".into());
+        state.audit_model = Some("qwen3:14b".into());
+        let result = state.into_config(&config);
+        assert_eq!(result.ollama_endpoint, "http://ollama:1234");
+        assert_eq!(result.fast_model, "qwen3:4b");
+        assert_eq!(result.core_model, "qwen3:8b");
+        assert_eq!(result.audit_model, "qwen3:14b");
+        // Other fields preserved from base config
+        assert_eq!(result.default_mode, "edit");
+    }
+
+    #[test]
+    fn step_number() {
+        let config = Config::default();
+        let mut state = WizardState::new(&config);
+        assert_eq!(state.step_number(), 1);
+        state.step = WizardStep::Connecting;
+        assert_eq!(state.step_number(), 2);
+        state.step = WizardStep::ModelSelect;
+        assert_eq!(state.step_number(), 3);
+        state.step = WizardStep::Confirm;
+        assert_eq!(state.step_number(), 4);
+    }
+}

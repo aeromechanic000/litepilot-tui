@@ -24,11 +24,11 @@ impl Theme {
     /// Dark terminal theme — white/cyan/blue on dark background.
     fn dark() -> Self {
         Self {
-            primary: Color::Cyan,                          // Bright cyan for key elements
-            secondary: Color::White,                       // White for secondary text
+            primary: Color::Rgb(0x4D, 0xA8, 0xFF),        // DeepSeek blue
+            secondary: Color::Rgb(0x8B, 0xB8, 0xE8),      // Soft blue
             bg_main: Color::Reset,                         // Terminal default
-            bg_sidebar: Color::Rgb(0x2A, 0x2A, 0x2A),     // Slightly lighter dark
-            text: Color::White,                            // White body text
+            bg_sidebar: Color::Rgb(0x1E, 0x24, 0x33),     // Dark blue-gray
+            text: Color::Rgb(0xE0, 0xE8, 0xF0),           // Light blue-white
             thinking: Color::Rgb(0x5F, 0xB8, 0xB0),       // Teal
             warning: Color::Rgb(0xFF, 0xD7, 0x00),        // Bright yellow
             error: Color::Rgb(0xFF, 0x6B, 0x6B),          // Bright red
@@ -43,11 +43,11 @@ impl Theme {
     /// Light terminal theme — black/blue on light background.
     fn light() -> Self {
         Self {
-            primary: Color::Rgb(0x00, 0x40, 0xB0),        // Deep blue
+            primary: Color::Rgb(0x10, 0x6E, 0xCB),        // DeepSeek blue (light variant)
             secondary: Color::Rgb(0x30, 0x60, 0x90),      // Slate blue
             bg_main: Color::Reset,                         // Terminal default
-            bg_sidebar: Color::Rgb(0xE8, 0xE8, 0xE8),     // Light gray
-            text: Color::Black,                            // Black body text
+            bg_sidebar: Color::Rgb(0xD8, 0xE4, 0xF0),     // Light blue-gray
+            text: Color::Rgb(0x1A, 0x1A, 0x2E),           // Dark navy
             thinking: Color::Rgb(0x00, 0x80, 0x78),       // Dark teal
             warning: Color::Rgb(0xB0, 0x8C, 0x00),        // Dark gold
             error: Color::Rgb(0xC0, 0x30, 0x30),          // Dark red
@@ -110,16 +110,16 @@ mod tests {
     #[test]
     fn dark_theme_colors() {
         let theme = Theme::dark();
-        assert_eq!(theme.primary, Color::Cyan);
-        assert_eq!(theme.text, Color::White);
+        assert_eq!(theme.primary, Color::Rgb(0x4D, 0xA8, 0xFF));
+        assert_eq!(theme.text, Color::Rgb(0xE0, 0xE8, 0xF0));
         assert_eq!(theme.bg_main, Color::Reset);
     }
 
     #[test]
     fn light_theme_colors() {
         let theme = Theme::light();
-        assert_eq!(theme.primary, Color::Rgb(0x00, 0x40, 0xB0));
-        assert_eq!(theme.text, Color::Black);
+        assert_eq!(theme.primary, Color::Rgb(0x10, 0x6E, 0xCB));
+        assert_eq!(theme.text, Color::Rgb(0x1A, 0x1A, 0x2E));
         assert_eq!(theme.bg_main, Color::Reset);
     }
 

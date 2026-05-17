@@ -10,6 +10,7 @@ mod session;
 mod skills;
 mod ui;
 mod util;
+mod wizard;
 
 use anyhow::Result;
 use app::{AppMode, AppState};
@@ -57,6 +58,9 @@ fn main() -> Result<()> {
     crossterm::execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Run setup wizard — user confirms or changes Ollama URL and model selection
+    let config = wizard::run(&mut terminal, config, &workspace)?;
 
     // Run app
     let result = run_app(&mut terminal, config, workspace);
@@ -175,6 +179,30 @@ fn run_app(
                             // Handle slash commands
                             let trimmed = input.trim();
                             if trimmed == "/skills" {
+                                let skills = app_state.skills.list();
+                                if skills.is_empty() {
+                                    ui_state.add_output(OutputLine::System("No skills loaded.".into()));
+                                } else {
+                                    let mut lines = vec!["Available skills:".to_string()];
+                                    for s in skills {
+                                        lines.push(format!("  /{} — {}", s.name, s.description));
+                                    }
+                                    ui_state.add_output(OutputLine::System(lines.join("\n")));
+                                }
+                            } else if trimmed == "/setup" {
+                                match wizard::run(terminal, app_state.config.clone(), &app_state.workspace) {
+                                    Ok(new_config) => {
+                                        app_state.config = new_config;
+                                        ui_state.add_output(OutputLine::System(
+                                            "Setup complete. Configuration updated.".into(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        ui_state.add_output(OutputLine::Error(
+                                            format!("Setup wizard failed: {}", e),
+                                        ));
+                                    }
+                                }
                                 let skills = app_state.skills.list();
                                 if skills.is_empty() {
                                     ui_state.add_output(OutputLine::System("No skills loaded.".into()));
