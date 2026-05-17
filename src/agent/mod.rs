@@ -8,6 +8,7 @@ use crate::ollama::chat::ChatMessage;
 use crate::ollama::OllamaClient;
 use crate::config::Config;
 use crate::sandbox::Sandbox;
+use crate::codebase::CodeBase;
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -63,12 +64,47 @@ impl<'a> AgentPipeline<'a> {
         Ok(Self::parse_plan(&response.content))
     }
 
-    pub async fn implement(&self, plan: &Plan, context: &str) -> Result<Vec<FileChange>> {
+    pub async fn plan_with_templates(
+        &self,
+        user_request: &str,
+        context: &str,
+        codebase: &CodeBase,
+    ) -> Result<Plan> {
+        let loaded = crate::codebase::retrieval::retrieve(
+            self.client, self.config, codebase, user_request, context,
+        )
+        .await;
+
+        let code_base_section = if loaded.refs.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nReference code from built-in library:\n{}", loaded.refs.join("\n"))
+        };
+
+        let messages = vec![
+            ChatMessage::system(prompts::PLANNING_SYSTEM),
+            ChatMessage::user(format!(
+                "Project context:\n{}{}\n\nUser request:\n{}\n\nOutput a structured plan with steps, files to create/modify, and dependencies.",
+                context, code_base_section, user_request
+            )),
+        ];
+        let model = self.config.effective_fast_model();
+        let response = self.client.chat(model, messages).await?;
+        Ok(Self::parse_plan(&response.content))
+    }
+
+    pub async fn implement(&self, plan: &Plan, context: &str, template_refs: &[String]) -> Result<Vec<FileChange>> {
+        let code_base_section = if template_refs.is_empty() {
+            String::new()
+        } else {
+            format!("\n\nReference code from built-in library:\n{}", template_refs.join("\n"))
+        };
+
         let messages = vec![
             ChatMessage::system(prompts::CODING_SYSTEM),
             ChatMessage::user(format!(
-                "Project context:\n{}\n\nPlan:\n{}\n\nImplement all changes. For each file, output:\n### FILE: path/to/file\n### ACTION: create|modify|delete\n```\nfile content\n```\n",
-                context,
+                "Project context:\n{}{}\n\nPlan:\n{}\n\nImplement all changes. For each file, output:\n### FILE: path/to/file\n### ACTION: create|modify|delete\n```\nfile content\n```\n",
+                context, code_base_section,
                 plan.steps.join("\n")
             )),
         ];

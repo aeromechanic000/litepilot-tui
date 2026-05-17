@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod index;
+pub mod retrieval;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;

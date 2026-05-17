@@ -68,6 +68,12 @@ const LARGE_MODEL_SYSTEM: &str = r#"You are an advanced coding assistant. Implem
 Use idiomatic patterns, proper error handling, and clean architecture.
 Output complete file contents for each change."#;
 
+pub const TEMPLATE_SELECTION_SYSTEM: &str = r#"You select relevant code templates for a coding task.
+Given a numbered catalog and a user request, output ONLY the indices of the most relevant templates, comma-separated.
+Consider: language/framework match, task type, code patterns.
+Output format: numbers only, e.g. 1,4,7
+If no templates are relevant, output: none"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;

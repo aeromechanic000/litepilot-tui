@@ -21,6 +21,8 @@ pub struct Config {
     pub auto_switch_network_region: bool,
     pub search_cache_valid_days: u64,
     pub max_search_context_tokens: usize,
+    pub max_template_context_tokens: usize,
+    pub template_max_select: usize,
 }
 
 impl Default for Config {
@@ -41,6 +43,8 @@ impl Default for Config {
             auto_switch_network_region: true,
             search_cache_valid_days: 30,
             max_search_context_tokens: 2048,
+            max_template_context_tokens: 2048,
+            template_max_select: 5,
         }
     }
 }

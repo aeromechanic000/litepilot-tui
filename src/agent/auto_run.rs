@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::sandbox::Sandbox;
 use crate::project::file_ops::FileOps;
 use crate::app::AppMode;
+use crate::codebase::CodeBase;
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -16,19 +17,30 @@ pub async fn run_auto_pipeline(
     workspace: PathBuf,
     user_request: &str,
     project_context: &str,
+    codebase: Option<&CodeBase>,
 ) -> Result<Vec<FileChange>> {
     let pipeline = AgentPipeline::new(client, config, sandbox, workspace.clone());
     let file_ops = FileOps::new(sandbox, AppMode::Auto);
 
-    // Step 1: Plan
-    let plan = pipeline.plan(user_request, project_context).await?;
+    // Step 1: Plan (with template retrieval if codebase available)
+    let (plan, template_refs) = if let Some(cb) = codebase {
+        let plan = pipeline.plan_with_templates(user_request, project_context, cb).await?;
+        let loaded = crate::codebase::retrieval::retrieve(
+            client, config, cb, user_request, project_context,
+        )
+        .await;
+        (plan, loaded.refs)
+    } else {
+        let plan = pipeline.plan(user_request, project_context).await?;
+        (plan, Vec::new())
+    };
 
     // Step 2: Implement + Audit loop
     let mut attempts = 0;
     let mut final_changes = Vec::new();
 
     while attempts <= MAX_RETRIES {
-        let changes = pipeline.implement(&plan, project_context).await?;
+        let changes = pipeline.implement(&plan, project_context, &template_refs).await?;
 
         if changes.is_empty() {
             break;
