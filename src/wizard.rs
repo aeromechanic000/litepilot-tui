@@ -6,7 +6,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
@@ -183,7 +183,7 @@ pub fn run(
     workspace: &std::path::Path,
 ) -> Result<Config> {
     let mut state = WizardState::new(&config);
-    let theme = Theme::detect();
+    let theme = Theme::from_config(&config.theme);
 
     loop {
         terminal.draw(|f| draw_wizard(f, &state, &theme))?;
@@ -490,7 +490,7 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
     // Help bar
     let help_y = area.y + area.height - 1;
     let help = Paragraph::new("Enter: connect  |  Ctrl+C: exit")
-        .style(Style::default().fg(theme.text));
+        .style(Style::default().fg(theme.secondary));
     f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 
@@ -585,7 +585,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
 
             let style = if is_selected {
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(theme.bg_sidebar)
                     .bg(theme.primary)
                     .add_modifier(Modifier::BOLD)
             } else {
@@ -599,7 +599,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
             ]));
         }
 
-        let list_para = Paragraph::new(list_lines);
+        let list_para = Paragraph::new(list_lines).style(Style::default().fg(theme.text));
         f.render_widget(list_para, Rect::new(area.x, list_y, area.width, list_height));
     }
 
@@ -631,7 +631,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
     // Help bar
     let help_y = area.y + area.height - 1;
     let help = Paragraph::new("Enter: select  |  Tab: skip  |  Esc: back")
-        .style(Style::default().fg(theme.text));
+        .style(Style::default().fg(theme.secondary));
     f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 

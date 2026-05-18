@@ -81,8 +81,8 @@ fn run_app(
     config: config::Config,
     workspace: PathBuf,
 ) -> Result<()> {
+    let mut ui_state = ui::UiState::from_config(&config);
     let mut app_state = AppState::new(config, workspace);
-    let mut ui_state = ui::UiState::default();
 
     // Welcome message
     ui_state.add_output(OutputLine::System(

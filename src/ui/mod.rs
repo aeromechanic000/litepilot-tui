@@ -54,6 +54,15 @@ impl Default for UiState {
 }
 
 impl UiState {
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self {
+            theme: Theme::from_config(&config.theme),
+            ..Self::default()
+        }
+    }
+}
+
+impl UiState {
     pub fn add_output(&mut self, line: OutputLine) {
         self.output_lines.push(line);
     }

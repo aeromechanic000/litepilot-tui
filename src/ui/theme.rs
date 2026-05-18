@@ -1,4 +1,5 @@
 use ratatui::style::Color;
+use crate::config::ThemeColors;
 
 pub struct Theme {
     pub primary: Color,
@@ -21,52 +22,22 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Dark terminal theme — white/cyan/blue on dark background.
-    fn dark() -> Self {
+    /// Build theme from config colors, falling back to defaults for unparseable values.
+    pub fn from_config(colors: &ThemeColors) -> Self {
         Self {
-            primary: Color::LightCyan,         // Bright cyan — main theme accent
-            secondary: Color::White,           // Bright white — labels, help text
-            bg_main: Color::Reset,             // Terminal default
-            bg_sidebar: Color::Rgb(0x1E, 0x24, 0x33), // Dark blue-gray
-            text: Color::White,                // Bright white
-            thinking: Color::LightGreen,       // Bright green
-            warning: Color::LightYellow,       // Bright yellow
-            error: Color::LightRed,            // Bright red
-            sandbox: Color::LightCyan,         // Bright cyan
-            code_keyword: Color::LightCyan,    // Bright cyan
-            code_string: Color::LightYellow,   // Bright yellow
-            code_comment: Color::Gray,         // Gray
-            success: Color::LightGreen,        // Bright green
-        }
-    }
-
-    /// Light terminal theme — dark text on light background.
-    fn light() -> Self {
-        Self {
-            primary: Color::Cyan,              // Standard cyan — main theme accent
-            secondary: Color::Black,           // Black — labels, help text
-            bg_main: Color::Reset,             // Terminal default
-            bg_sidebar: Color::Rgb(0xD8, 0xE4, 0xF0), // Light blue-gray
-            text: Color::Black,                // Black
-            thinking: Color::Green,            // Green
-            warning: Color::Yellow,            // Yellow
-            error: Color::Red,                 // Red
-            sandbox: Color::Cyan,              // Cyan
-            code_keyword: Color::Cyan,         // Cyan
-            code_string: Color::Yellow,        // Yellow
-            code_comment: Color::DarkGray,     // Dark gray
-            success: Color::Green,             // Green
-        }
-    }
-
-    /// Detect whether the terminal has a dark or light background.
-    /// Uses the `$COLORFGBG` env var (set by xterm, rxvt, iTerm2, etc.)
-    /// or defaults to dark.
-    pub fn detect() -> Self {
-        if is_light_background() {
-            Self::light()
-        } else {
-            Self::dark()
+            primary: parse_color(&colors.primary).unwrap_or(Color::Rgb(0x67, 0xE8, 0xF9)),
+            secondary: parse_color(&colors.secondary).unwrap_or(Color::Rgb(0xA5, 0xF3, 0xFC)),
+            bg_main: parse_color(&colors.bg_main).unwrap_or(Color::Reset),
+            bg_sidebar: parse_color(&colors.bg_sidebar).unwrap_or(Color::Rgb(0x16, 0x4E, 0x63)),
+            text: parse_color(&colors.text).unwrap_or(Color::Rgb(0xE0, 0xF7, 0xFA)),
+            thinking: parse_color(&colors.thinking).unwrap_or(Color::Rgb(0x5E, 0xEA, 0xD4)),
+            warning: parse_color(&colors.warning).unwrap_or(Color::Rgb(0xFD, 0xE6, 0x8A)),
+            error: parse_color(&colors.error).unwrap_or(Color::Rgb(0xFC, 0xA5, 0xA5)),
+            sandbox: parse_color(&colors.sandbox).unwrap_or(Color::Rgb(0x67, 0xE8, 0xF9)),
+            code_keyword: parse_color(&colors.code_keyword).unwrap_or(Color::Rgb(0x67, 0xE8, 0xF9)),
+            code_string: parse_color(&colors.code_string).unwrap_or(Color::Rgb(0xA5, 0xF3, 0xFC)),
+            code_comment: parse_color(&colors.code_comment).unwrap_or(Color::Rgb(0xB0, 0xBE, 0xC5)),
+            success: parse_color(&colors.success).unwrap_or(Color::Rgb(0x6E, 0xE7, 0xB7)),
         }
     }
 
@@ -79,27 +50,26 @@ impl Theme {
     }
 }
 
-/// Check `$COLORFGBG` for background color hint.
-/// Format: "fg_num;bg_num" where 0=black, 7=light gray, 15=white.
-/// Values > 7 are treated as light backgrounds.
-fn is_light_background() -> bool {
-    std::env::var("COLORFGBG")
-        .ok()
-        .and_then(|val| {
-            // e.g. "0;15" or "15;0" — take the bg part after ';'
-            let parts: Vec<&str> = val.split(';').collect();
-            if parts.len() >= 2 {
-                parts.last()?.parse::<u8>().ok()
-            } else {
-                None
-            }
-        })
-        .map_or(false, |bg| bg > 7)
+/// Parse a hex color string like "#06B6D4" or the special value "reset".
+/// Returns None for unparseable strings.
+fn parse_color(s: &str) -> Option<Color> {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("reset") {
+        return Some(Color::Reset);
+    }
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+    Some(Color::Rgb(r, g, b))
 }
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::detect()
+        Self::from_config(&ThemeColors::default())
     }
 }
 
@@ -108,38 +78,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dark_theme_colors() {
-        let theme = Theme::dark();
-        assert_eq!(theme.primary, Color::LightCyan);
-        assert_eq!(theme.secondary, Color::White);
-        assert_eq!(theme.text, Color::White);
+    fn default_theme_uses_config_colors() {
+        let theme = Theme::default();
+        assert_eq!(theme.primary, parse_color(&ThemeColors::default().primary).unwrap());
         assert_eq!(theme.bg_main, Color::Reset);
-    }
-
-    #[test]
-    fn light_theme_colors() {
-        let theme = Theme::light();
-        assert_eq!(theme.primary, Color::Cyan);
-        assert_eq!(theme.text, Color::Black);
-        assert_eq!(theme.bg_main, Color::Reset);
-    }
-
-    #[test]
-    fn detect_uses_env_var() {
-        // Without COLORFGBG set (or with a dark value), should default to dark
-        let theme = Theme::detect();
-        // We can't control env vars in tests, just verify it doesn't panic
-        assert!(!theme.text.to_string().is_empty() || true);
     }
 
     #[test]
     fn mode_indicators() {
-        let theme = Theme::dark();
+        let theme = Theme::default();
         let (label, _) = theme.mode_indicator(&crate::app::AppMode::Plan);
         assert_eq!(label, "PLAN");
         let (label, _) = theme.mode_indicator(&crate::app::AppMode::Edit);
         assert_eq!(label, "EDIT");
         let (label, _) = theme.mode_indicator(&crate::app::AppMode::Auto);
         assert_eq!(label, "AUTO");
+    }
+
+    #[test]
+    fn parse_color_hex() {
+        assert_eq!(parse_color("#06B6D4"), Some(Color::Rgb(0x06, 0xB6, 0xD4)));
+        assert_eq!(parse_color("#000000"), Some(Color::Rgb(0, 0, 0)));
+        assert_eq!(parse_color("#FFFFFF"), Some(Color::Rgb(0xFF, 0xFF, 0xFF)));
+    }
+
+    #[test]
+    fn parse_color_reset() {
+        assert_eq!(parse_color("reset"), Some(Color::Reset));
+        assert_eq!(parse_color("Reset"), Some(Color::Reset));
+        assert_eq!(parse_color(" RESET "), Some(Color::Reset));
+    }
+
+    #[test]
+    fn parse_color_invalid() {
+        assert_eq!(parse_color(""), None);
+        assert_eq!(parse_color("#FFF"), None);
+        assert_eq!(parse_color("notacolor"), None);
+        assert_eq!(parse_color("#GGGGGG"), None);
+    }
+
+    #[test]
+    fn from_config_uses_provided_colors() {
+        let colors = ThemeColors {
+            primary: "#FF0000".into(),
+            ..ThemeColors::default()
+        };
+        let theme = Theme::from_config(&colors);
+        assert_eq!(theme.primary, Color::Rgb(0xFF, 0, 0));
+        assert_eq!(theme.bg_main, Color::Reset);
+    }
+
+    #[test]
+    fn from_config_handles_invalid_colors() {
+        let colors = ThemeColors {
+            primary: "not-a-color".into(),
+            ..ThemeColors::default()
+        };
+        let theme = Theme::from_config(&colors);
+        assert_eq!(theme.primary, Color::Rgb(0x67, 0xE8, 0xF9)); // hardcoded fallback
     }
 }
