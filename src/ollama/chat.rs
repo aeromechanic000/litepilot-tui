@@ -61,8 +61,11 @@ impl OllamaClient {
             stream: false,
         };
 
-        let resp = self.http.post(&url).json(&body).send().await
-            .with_context(|| "Sending chat request to Ollama")?;
+        let resp = self.http.post(&url)
+            .timeout(std::time::Duration::from_secs(300))
+            .json(&body)
+            .send().await
+            .with_context(|| format!("Sending chat request to Ollama at {}", url))?;
 
         if resp.status() == StatusCode::NOT_FOUND {
             anyhow::bail!("Model '{}' not found in Ollama", model);

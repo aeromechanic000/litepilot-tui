@@ -151,7 +151,7 @@ pub async fn chat_with_retry(
             Ok(r) => r,
             Err(e) => {
                 return RetryResult::Failed {
-                    last_error: format!("Ollama error: {}", e),
+                    last_error: format!("Ollama error: {:#}", e),
                     attempts: attempt,
                 };
             }

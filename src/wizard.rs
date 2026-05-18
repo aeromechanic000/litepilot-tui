@@ -274,15 +274,8 @@ fn handle_url_input(state: &mut WizardState, modifiers: KeyModifiers, code: KeyC
                         state.current_slot = ModelSlot::Fast;
                         // Pre-position on the existing model for the first slot
                         state.jump_to_existing_model();
-                        // If all models already selected from config, skip to confirm
-                        if state.fast_model.is_some()
-                            && state.core_model.is_some()
-                            && state.audit_model.is_some()
-                        {
-                            state.step = WizardStep::Confirm;
-                        } else {
-                            state.step = WizardStep::ModelSelect;
-                        }
+                        // Always walk through model selection so user can review/change
+                        state.step = WizardStep::ModelSelect;
                     }
                 }
                 Err(e) => {
@@ -398,8 +391,11 @@ fn handle_confirm(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCod
             Action::Save
         }
         (KeyModifiers::NONE, KeyCode::Esc) => {
-            state.step = WizardStep::UrlInput;
-            state.error_msg = None;
+            state.current_slot = ModelSlot::Fast;
+            state.selected_index = 0;
+            state.scroll_offset = 0;
+            state.jump_to_existing_model();
+            state.step = WizardStep::ModelSelect;
             Action::Continue
         }
         _ => Action::Continue,
@@ -477,11 +473,12 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
         lines.push(Line::from(""));
     }
 
+    let text_line_count = lines.len() as u16;
     let content = Paragraph::new(lines).style(Style::default().fg(theme.text));
     f.render_widget(content, area);
 
-    // Input field
-    let input_y = area.y + area.height.min(7) - 3;
+    // Input field — positioned right after the text lines
+    let input_y = area.y + text_line_count;
     let input_area = Rect::new(area.x, input_y, area.width, 3);
     let input_display = format!(" {}_", &state.input_text);
     let input = Paragraph::new(input_display).style(
@@ -681,7 +678,7 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Enter: confirm and start  |  Esc: go back and change",
+        "Enter: confirm and start  |  Esc: re-select models",
         Style::default().fg(theme.secondary),
     )));
 

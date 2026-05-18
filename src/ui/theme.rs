@@ -24,16 +24,16 @@ impl Theme {
     /// Dark terminal theme — white/cyan/blue on dark background.
     fn dark() -> Self {
         Self {
-            primary: Color::Rgb(0x4D, 0xA8, 0xFF),        // DeepSeek blue
-            secondary: Color::Rgb(0x8B, 0xB8, 0xE8),      // Soft blue
+            primary: Color::Rgb(0x7E, 0xC8, 0xFF),        // Bright sky blue
+            secondary: Color::Rgb(0x7E, 0xC8, 0xFF),      // Same as primary for consistency
             bg_main: Color::Reset,                         // Terminal default
             bg_sidebar: Color::Rgb(0x1E, 0x24, 0x33),     // Dark blue-gray
-            text: Color::Rgb(0xE0, 0xE8, 0xF0),           // Light blue-white
-            thinking: Color::Rgb(0x5F, 0xB8, 0xB0),       // Teal
+            text: Color::Rgb(0xF0, 0xF6, 0xFF),           // Near white
+            thinking: Color::Rgb(0x7E, 0xD8, 0xD0),       // Bright teal
             warning: Color::Rgb(0xFF, 0xD7, 0x00),        // Bright yellow
             error: Color::Rgb(0xFF, 0x6B, 0x6B),          // Bright red
             sandbox: Color::Rgb(0x80, 0xE0, 0xFF),        // Ice blue
-            code_keyword: Color::Rgb(0x56, 0xD4, 0xDD),   // Bright cyan-blue
+            code_keyword: Color::Rgb(0x6E, 0xE8, 0xF2),   // Bright cyan
             code_string: Color::Rgb(0xCE, 0x91, 0x78),    // Warm orange
             code_comment: Color::Rgb(0x9A, 0x9A, 0x9A),   // Visible gray
             success: Color::Rgb(0x73, 0xD2, 0x16),        // Bright green
@@ -110,8 +110,9 @@ mod tests {
     #[test]
     fn dark_theme_colors() {
         let theme = Theme::dark();
-        assert_eq!(theme.primary, Color::Rgb(0x4D, 0xA8, 0xFF));
-        assert_eq!(theme.text, Color::Rgb(0xE0, 0xE8, 0xF0));
+        assert_eq!(theme.primary, Color::Rgb(0x7E, 0xC8, 0xFF));
+        assert_eq!(theme.secondary, Color::Rgb(0x7E, 0xC8, 0xFF));
+        assert_eq!(theme.text, Color::Rgb(0xF0, 0xF6, 0xFF));
         assert_eq!(theme.bg_main, Color::Reset);
     }
 
