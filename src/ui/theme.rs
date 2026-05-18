@@ -24,38 +24,38 @@ impl Theme {
     /// Dark terminal theme — white/cyan/blue on dark background.
     fn dark() -> Self {
         Self {
-            primary: Color::Rgb(0x7E, 0xC8, 0xFF),        // Bright sky blue
-            secondary: Color::Rgb(0x7E, 0xC8, 0xFF),      // Same as primary for consistency
-            bg_main: Color::Reset,                         // Terminal default
-            bg_sidebar: Color::Rgb(0x1E, 0x24, 0x33),     // Dark blue-gray
-            text: Color::Rgb(0xF0, 0xF6, 0xFF),           // Near white
-            thinking: Color::Rgb(0x7E, 0xD8, 0xD0),       // Bright teal
-            warning: Color::Rgb(0xFF, 0xD7, 0x00),        // Bright yellow
-            error: Color::Rgb(0xFF, 0x6B, 0x6B),          // Bright red
-            sandbox: Color::Rgb(0x80, 0xE0, 0xFF),        // Ice blue
-            code_keyword: Color::Rgb(0x6E, 0xE8, 0xF2),   // Bright cyan
-            code_string: Color::Rgb(0xCE, 0x91, 0x78),    // Warm orange
-            code_comment: Color::Rgb(0x9A, 0x9A, 0x9A),   // Visible gray
-            success: Color::Rgb(0x73, 0xD2, 0x16),        // Bright green
+            primary: Color::LightCyan,         // Bright cyan — main theme accent
+            secondary: Color::White,           // Bright white — labels, help text
+            bg_main: Color::Reset,             // Terminal default
+            bg_sidebar: Color::Rgb(0x1E, 0x24, 0x33), // Dark blue-gray
+            text: Color::White,                // Bright white
+            thinking: Color::LightGreen,       // Bright green
+            warning: Color::LightYellow,       // Bright yellow
+            error: Color::LightRed,            // Bright red
+            sandbox: Color::LightCyan,         // Bright cyan
+            code_keyword: Color::LightCyan,    // Bright cyan
+            code_string: Color::LightYellow,   // Bright yellow
+            code_comment: Color::Gray,         // Gray
+            success: Color::LightGreen,        // Bright green
         }
     }
 
-    /// Light terminal theme — black/blue on light background.
+    /// Light terminal theme — dark text on light background.
     fn light() -> Self {
         Self {
-            primary: Color::Rgb(0x10, 0x6E, 0xCB),        // DeepSeek blue (light variant)
-            secondary: Color::Rgb(0x30, 0x60, 0x90),      // Slate blue
-            bg_main: Color::Reset,                         // Terminal default
-            bg_sidebar: Color::Rgb(0xD8, 0xE4, 0xF0),     // Light blue-gray
-            text: Color::Rgb(0x1A, 0x1A, 0x2E),           // Dark navy
-            thinking: Color::Rgb(0x00, 0x80, 0x78),       // Dark teal
-            warning: Color::Rgb(0xB0, 0x8C, 0x00),        // Dark gold
-            error: Color::Rgb(0xC0, 0x30, 0x30),          // Dark red
-            sandbox: Color::Rgb(0x00, 0x70, 0x90),        // Dark cyan
-            code_keyword: Color::Rgb(0x00, 0x50, 0xA0),   // Blue
-            code_string: Color::Rgb(0xA0, 0x60, 0x40),    // Brown
-            code_comment: Color::Rgb(0x60, 0x60, 0x60),   // Dark gray
-            success: Color::Rgb(0x30, 0x80, 0x30),        // Dark green
+            primary: Color::Cyan,              // Standard cyan — main theme accent
+            secondary: Color::Black,           // Black — labels, help text
+            bg_main: Color::Reset,             // Terminal default
+            bg_sidebar: Color::Rgb(0xD8, 0xE4, 0xF0), // Light blue-gray
+            text: Color::Black,                // Black
+            thinking: Color::Green,            // Green
+            warning: Color::Yellow,            // Yellow
+            error: Color::Red,                 // Red
+            sandbox: Color::Cyan,              // Cyan
+            code_keyword: Color::Cyan,         // Cyan
+            code_string: Color::Yellow,        // Yellow
+            code_comment: Color::DarkGray,     // Dark gray
+            success: Color::Green,             // Green
         }
     }
 
@@ -110,17 +110,17 @@ mod tests {
     #[test]
     fn dark_theme_colors() {
         let theme = Theme::dark();
-        assert_eq!(theme.primary, Color::Rgb(0x7E, 0xC8, 0xFF));
-        assert_eq!(theme.secondary, Color::Rgb(0x7E, 0xC8, 0xFF));
-        assert_eq!(theme.text, Color::Rgb(0xF0, 0xF6, 0xFF));
+        assert_eq!(theme.primary, Color::LightCyan);
+        assert_eq!(theme.secondary, Color::White);
+        assert_eq!(theme.text, Color::White);
         assert_eq!(theme.bg_main, Color::Reset);
     }
 
     #[test]
     fn light_theme_colors() {
         let theme = Theme::light();
-        assert_eq!(theme.primary, Color::Rgb(0x10, 0x6E, 0xCB));
-        assert_eq!(theme.text, Color::Rgb(0x1A, 0x1A, 0x2E));
+        assert_eq!(theme.primary, Color::Cyan);
+        assert_eq!(theme.text, Color::Black);
         assert_eq!(theme.bg_main, Color::Reset);
     }
 

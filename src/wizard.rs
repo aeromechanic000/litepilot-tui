@@ -6,7 +6,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
@@ -41,14 +41,6 @@ impl ModelSlot {
             ModelSlot::Fast => "Quick planning & routing",
             ModelSlot::Core => "Main coding assistant",
             ModelSlot::Audit => "Code review & quality",
-        }
-    }
-
-    fn recommended_size(&self) -> &'static str {
-        match self {
-            ModelSlot::Fast => "Small",
-            ModelSlot::Core => "Medium",
-            ModelSlot::Audit => "Medium",
         }
     }
 
@@ -196,6 +188,12 @@ pub fn run(
     loop {
         terminal.draw(|f| draw_wizard(f, &state, &theme))?;
 
+        // Perform the connection attempt after the "Connecting" screen has rendered
+        if state.step == WizardStep::Connecting {
+            try_connect(&mut state);
+            continue;
+        }
+
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match handle_key(&mut state, key.modifiers, key.code) {
@@ -230,6 +228,48 @@ fn handle_key(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -
     }
 }
 
+/// Attempt to connect to Ollama and fetch models. Called after the "Connecting" screen renders.
+fn try_connect(state: &mut WizardState) {
+    let url = state.url.clone();
+    let result: Result<Vec<ModelInfo>> = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(async {
+            let temp_config = Config {
+                ollama_endpoint: url,
+                connect_timeout: 10,
+                ..Config::default()
+            };
+            let client = ollama::OllamaClient::new(&temp_config)?;
+            client.ping().await?;
+            client.list_models().await
+        })
+    })
+    .join()
+    .unwrap_or(Err(anyhow::anyhow!("Thread panicked")));
+
+    match result {
+        Ok(models) => {
+            if models.is_empty() {
+                state.error_msg = Some(
+                    "No models found. Pull models with: ollama pull <model>".into(),
+                );
+                state.step = WizardStep::ModelSelect;
+            } else {
+                state.models = models;
+                state.selected_index = 0;
+                state.scroll_offset = 0;
+                state.current_slot = ModelSlot::Fast;
+                state.jump_to_existing_model();
+                state.step = WizardStep::ModelSelect;
+            }
+        }
+        Err(e) => {
+            state.error_msg = Some(format!("Connection failed: {}", e));
+            state.step = WizardStep::UrlInput;
+        }
+    }
+}
+
 fn handle_url_input(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -> Action {
     match (modifiers, code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
@@ -239,50 +279,9 @@ fn handle_url_input(state: &mut WizardState, modifiers: KeyModifiers, code: KeyC
             } else {
                 state.input_text.clone()
             };
-            state.url = url.clone();
+            state.url = url;
             state.error_msg = None;
             state.step = WizardStep::Connecting;
-
-            // Try to connect and fetch models
-            let result: Result<Vec<ModelInfo>> = std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new()?;
-                rt.block_on(async {
-                    let temp_config = Config {
-                        ollama_endpoint: url,
-                        connect_timeout: 10,
-                        ..Config::default()
-                    };
-                    let client = ollama::OllamaClient::new(&temp_config)?;
-                    client.ping().await?;
-                    client.list_models().await
-                })
-            })
-            .join()
-            .unwrap_or(Err(anyhow::anyhow!("Thread panicked")));
-
-            match result {
-                Ok(models) => {
-                    if models.is_empty() {
-                        state.error_msg = Some(
-                            "No models found. Pull models with: ollama pull <model>".into(),
-                        );
-                        state.step = WizardStep::ModelSelect;
-                    } else {
-                        state.models = models;
-                        state.selected_index = 0;
-                        state.scroll_offset = 0;
-                        state.current_slot = ModelSlot::Fast;
-                        // Pre-position on the existing model for the first slot
-                        state.jump_to_existing_model();
-                        // Always walk through model selection so user can review/change
-                        state.step = WizardStep::ModelSelect;
-                    }
-                }
-                Err(e) => {
-                    state.error_msg = Some(format!("Connection failed: {}", e));
-                    state.step = WizardStep::UrlInput;
-                }
-            }
             Action::Continue
         }
         (KeyModifiers::NONE, KeyCode::Backspace) => {
@@ -405,8 +404,8 @@ fn handle_confirm(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCod
 fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
     let size = f.area();
 
-    // Full-screen background
-    let bg = Block::default().style(Style::default().bg(theme.bg_sidebar));
+    // Full-screen background — same as main UI
+    let bg = Block::default().style(Style::default().bg(theme.bg_main));
     f.render_widget(bg, size);
 
     // Centered content area
@@ -428,7 +427,7 @@ fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.primary))
-        .style(Style::default().bg(theme.bg_sidebar).fg(theme.text));
+        .style(Style::default().bg(theme.bg_main).fg(theme.text));
     f.render_widget(container, area);
 
     let inner = Rect::new(
@@ -491,7 +490,7 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
     // Help bar
     let help_y = area.y + area.height - 1;
     let help = Paragraph::new("Enter: connect  |  Ctrl+C: exit")
-        .style(Style::default().fg(theme.secondary));
+        .style(Style::default().fg(theme.text));
     f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 
@@ -524,7 +523,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
         )),
         Line::from(Span::styled(
             state.current_slot.description(),
-            Style::default().fg(theme.secondary),
+            Style::default().fg(theme.text),
         )),
         Line::from(""),
     ];
@@ -549,7 +548,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
             Line::from(""),
             Line::from(Span::styled(
                 "Type a model name and press Enter:",
-                Style::default().fg(theme.secondary),
+                Style::default().fg(theme.text),
             )),
         ];
         let para = Paragraph::new(no_model_lines).style(Style::default().fg(theme.text));
@@ -584,17 +583,10 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
                 format!("  [{}]", model.family)
             };
 
-            let recommended = state.current_slot.recommended_size();
-            let is_recommended = model.size_class.to_string().starts_with(recommended);
-
             let style = if is_selected {
                 Style::default()
-                    .fg(theme.bg_sidebar)
+                    .fg(Color::Black)
                     .bg(theme.primary)
-                    .add_modifier(Modifier::BOLD)
-            } else if is_recommended {
-                Style::default()
-                    .fg(theme.primary)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.text)
@@ -615,7 +607,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
     let selected_y = area.y + area.height - 3;
     let mut selected_lines = vec![Line::from(Span::styled(
         "Selected:",
-        Style::default().fg(theme.secondary),
+        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
     ))];
     for slot in &[ModelSlot::Fast, ModelSlot::Core, ModelSlot::Audit] {
         if let Some(ref name) = *state.selected_model_for_slot(*slot) {
@@ -639,7 +631,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
     // Help bar
     let help_y = area.y + area.height - 1;
     let help = Paragraph::new("Enter: select  |  Tab: skip  |  Esc: back")
-        .style(Style::default().fg(theme.secondary));
+        .style(Style::default().fg(theme.text));
     f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 
@@ -653,8 +645,8 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Ollama URL: ", Style::default().fg(theme.secondary)),
-            Span::styled(&state.url, Style::default().fg(theme.text)),
+            Span::styled("  Ollama URL: ", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+            Span::styled(&state.url, Style::default().fg(theme.primary)),
         ]),
         Line::from(""),
     ];
@@ -670,16 +662,16 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {:>12}: ", slot.label()),
-                Style::default().fg(theme.secondary),
+                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(model_display, Style::default().fg(theme.text)),
+            Span::styled(model_display, Style::default().fg(theme.primary)),
         ]));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter: confirm and start  |  Esc: re-select models",
-        Style::default().fg(theme.secondary),
+        Style::default().fg(theme.text),
     )));
 
     let content = Paragraph::new(lines).style(Style::default().fg(theme.text));

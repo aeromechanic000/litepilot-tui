@@ -117,7 +117,7 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
     let spans = vec![
         Span::styled(" LiteCode ", Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)),
         Span::styled(" | ", Style::default().fg(theme.text)),
-        Span::styled(&app.config.ollama_endpoint, Style::default().fg(theme.secondary)),
+        Span::styled(&app.config.ollama_endpoint, Style::default().fg(theme.text)),
         Span::styled(" | ", Style::default().fg(theme.text)),
         Span::styled(format!("F:{}", fast), Style::default().fg(theme.text)),
         Span::styled(" ", Style::default()),
@@ -169,7 +169,7 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
             )),
             OutputLine::System(text) => Line::from(Span::styled(
                 format!("[system] {}", text),
-                Style::default().fg(theme.secondary),
+                Style::default().fg(theme.thinking),
             )),
             OutputLine::Error(text) => Line::from(Span::styled(
                 format!("[error] {}", text),
@@ -241,7 +241,7 @@ fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect) {
         .style(Style::default().fg(theme.text).bg(theme.bg_main))
         .block(Block::default()
             .borders(Borders::TOP)
-            .border_style(Style::default().fg(theme.secondary))
+            .border_style(Style::default().fg(theme.primary))
             .title(Span::styled(
                 " Shift+Tab:mode | Enter:send | Ctrl+S:search | Ctrl+C:quit ",
                 Style::default().fg(theme.text),
