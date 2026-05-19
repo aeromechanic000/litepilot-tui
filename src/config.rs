@@ -4,54 +4,25 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:11434";
 
-/// Customizable theme colors stored as hex strings (e.g. "#22D3EE").
-/// Use "reset" to defer to the terminal's default color.
+/// Theme colors stored as hex strings (e.g. "#315DFC").
+/// All other UI colors are derived from these three — normal text and
+/// backgrounds use terminal defaults ("reset").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeColors {
     #[serde(default)]
     pub primary: String,
     #[serde(default)]
-    pub secondary: String,
-    #[serde(default)]
-    pub bg_main: String,
-    #[serde(default)]
-    pub bg_sidebar: String,
-    #[serde(default)]
-    pub text: String,
-    #[serde(default)]
-    pub thinking: String,
+    pub accent: String,
     #[serde(default)]
     pub warning: String,
-    #[serde(default)]
-    pub error: String,
-    #[serde(default)]
-    pub sandbox: String,
-    #[serde(default)]
-    pub code_keyword: String,
-    #[serde(default)]
-    pub code_string: String,
-    #[serde(default)]
-    pub code_comment: String,
-    #[serde(default)]
-    pub success: String,
 }
 
 impl Default for ThemeColors {
     fn default() -> Self {
         Self {
-            primary: "#67E8F9".into(),     // Cyan-300 — bright cyan
-            secondary: "#A5F3FC".into(),    // Cyan-200
-            bg_main: "reset".into(),        // Terminal default
-            bg_sidebar: "#164E63".into(),   // Cyan-900
-            text: "#E0F7FA".into(),         // Light cyan-white
-            thinking: "#5EEAD4".into(),     // Teal-300
-            warning: "#FDE68A".into(),      // Amber-200
-            error: "#FCA5A5".into(),        // Red-300
-            sandbox: "#67E8F9".into(),      // Cyan-300
-            code_keyword: "#67E8F9".into(), // Cyan-300
-            code_string: "#A5F3FC".into(),  // Cyan-200
-            code_comment: "#B0BEC5".into(), // Light gray-blue
-            success: "#6EE7B7".into(),      // Emerald-300
+            primary: "blue".into(),
+            accent: "cyan".into(),
+            warning: "yellow".into(),
         }
     }
 }
@@ -293,7 +264,7 @@ mod tests {
         assert!(config.validate().is_ok());
         assert_eq!(config.default_mode, "edit");
         assert_eq!(config.connect_timeout, 15);
-        assert_eq!(config.theme.primary, "#67E8F9");
+        assert_eq!(config.theme.primary, "blue");
     }
 
     #[test]
@@ -301,8 +272,8 @@ mod tests {
         let config = Config::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("[theme]"));
-        assert!(toml_str.contains("primary = \"#67E8F9\""));
-        assert!(toml_str.contains("bg_main = \"reset\""));
+        assert!(toml_str.contains("primary = \"blue\""));
+        assert!(toml_str.contains("accent = \"cyan\""));
     }
 
     #[test]

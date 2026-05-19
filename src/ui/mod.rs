@@ -125,27 +125,25 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
 
     let spans = vec![
         Span::styled(" LiteCode ", Style::default().fg(theme.primary).add_modifier(Modifier::BOLD)),
-        Span::styled(" | ", Style::default().fg(theme.text)),
-        Span::styled(&app.config.ollama_endpoint, Style::default().fg(theme.text)),
-        Span::styled(" | ", Style::default().fg(theme.text)),
-        Span::styled(format!("F:{}", fast), Style::default().fg(theme.text)),
-        Span::styled(" ", Style::default()),
-        Span::styled(format!("C:{}", core), Style::default().fg(theme.text)),
-        Span::styled(" ", Style::default()),
-        Span::styled(format!("A:{}", audit), Style::default().fg(theme.text)),
-        Span::styled(" | ", Style::default().fg(theme.text)),
+        Span::raw(" | "),
+        Span::raw(&app.config.ollama_endpoint),
+        Span::raw(" | "),
+        Span::raw(format!("F:{}", fast)),
+        Span::raw(" "),
+        Span::raw(format!("C:{}", core)),
+        Span::raw(" "),
+        Span::raw(format!("A:{}", audit)),
+        Span::raw(" | "),
         Span::styled(format!("[{}]", mode_label), Style::default().fg(mode_color).add_modifier(Modifier::BOLD)),
-        Span::styled(" | ", Style::default().fg(theme.text)),
-        Span::styled(search_indicator, Style::default().fg(theme.text)),
-        Span::styled(" | ", Style::default().fg(theme.text)),
-        Span::styled(
+        Span::raw(" | "),
+        Span::raw(search_indicator),
+        Span::raw(" | "),
+        Span::raw(
             truncate_path(&app.workspace.to_string_lossy(), area.width as usize / 2),
-            Style::default().fg(theme.text),
         ),
     ];
 
-    let status = Paragraph::new(Line::from(spans))
-        .style(Style::default().fg(theme.text).bg(theme.bg_main));
+    let status = Paragraph::new(Line::from(spans));
     f.render_widget(status, area);
 }
 
@@ -172,29 +170,26 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
                 format!("> {}", text),
                 Style::default().fg(theme.primary),
             )),
-            OutputLine::Assistant(text) => Line::from(Span::styled(
-                text,
-                Style::default().fg(theme.text),
-            )),
+            OutputLine::Assistant(text) => Line::raw(text),
             OutputLine::System(text) => Line::from(Span::styled(
                 format!("[system] {}", text),
-                Style::default().fg(theme.thinking),
+                Style::default().fg(theme.accent),
             )),
             OutputLine::Error(text) => Line::from(Span::styled(
                 format!("[error] {}", text),
-                Style::default().fg(theme.error),
+                Style::default().fg(theme.warning),
             )),
             OutputLine::Code { language, code } => {
                 let header = format!("[{}]", language);
                 let content = code.lines().take(50).map(|l| format!("  {}", l)).collect::<Vec<_>>().join("\n");
                 Line::from(Span::styled(
                     format!("{}\n{}", header, content),
-                    Style::default().fg(theme.code_keyword),
+                    Style::default().fg(theme.primary),
                 ))
             }
             OutputLine::Thinking(text) => Line::from(Span::styled(
                 format!("thinking: {}", text),
-                Style::default().fg(theme.thinking),
+                Style::default().fg(theme.accent),
             )),
             OutputLine::Diff { added, removed } => {
                 let mut parts = Vec::new();
@@ -204,21 +199,12 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
                 for a in added {
                     parts.push(format!("+ {}", a));
                 }
-                Line::from(Span::styled(
-                    parts.join("\n"),
-                    Style::default().fg(theme.text),
-                ))
+                Line::raw(parts.join("\n"))
             }
         }
     }).collect();
 
-    // Clear main area background first
-    let clear = Block::default()
-        .style(Style::default().bg(theme.bg_main));
-    f.render_widget(clear, main_area);
-
     let output = Paragraph::new(lines)
-        .style(Style::default().fg(theme.text).bg(theme.bg_main))
         .wrap(Wrap { trim: false })
         .scroll((ui.scroll_offset, 0));
     f.render_widget(output, main_area);
@@ -229,13 +215,7 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
             SidebarTab::ProjectFiles => "Project Files",
             SidebarTab::CodeBase => "Code Base",
         };
-        // Clear the entire sidebar area first to prevent leftover colors
-        let clear = Block::default()
-            .style(Style::default().fg(theme.text).bg(theme.bg_sidebar));
-        f.render_widget(clear, sidebar_area);
-        // Then render the content on top
         let sidebar = Paragraph::new(tab_indicator)
-            .style(Style::default().fg(theme.text).bg(theme.bg_sidebar))
             .block(Block::default()
                 .borders(Borders::LEFT)
                 .border_style(Style::default().fg(theme.primary))
@@ -247,13 +227,12 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
 fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect) {
     let theme = &ui.theme;
     let input = Paragraph::new(ui.input_text.as_str())
-        .style(Style::default().fg(theme.text).bg(theme.bg_main))
         .block(Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(theme.primary))
             .title(Span::styled(
                 " Shift+Tab:mode | Enter:send | Ctrl+S:search | Ctrl+C:quit ",
-                Style::default().fg(theme.text),
+                Style::default().fg(theme.accent),
             ))
         );
     f.render_widget(input, area);

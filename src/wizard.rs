@@ -405,7 +405,7 @@ fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
     let size = f.area();
 
     // Full-screen background — same as main UI
-    let bg = Block::default().style(Style::default().bg(theme.bg_main));
+    let bg = Block::default();
     f.render_widget(bg, size);
 
     // Centered content area
@@ -427,7 +427,7 @@ fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
         ))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.primary))
-        .style(Style::default().bg(theme.bg_main).fg(theme.text));
+        .style(Style::default());
     f.render_widget(container, area);
 
     let inner = Rect::new(
@@ -459,7 +459,7 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
         Line::from(""),
         Line::from(Span::styled(
             "Ollama URL:",
-            Style::default().fg(theme.secondary),
+            Style::default().fg(theme.accent),
         )),
     ];
 
@@ -467,13 +467,13 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             format!("  {}", err),
-            Style::default().fg(theme.error),
+            Style::default().fg(theme.warning),
         )));
         lines.push(Line::from(""));
     }
 
     let text_line_count = lines.len() as u16;
-    let content = Paragraph::new(lines).style(Style::default().fg(theme.text));
+    let content = Paragraph::new(lines).style(Style::default());
     f.render_widget(content, area);
 
     // Input field — positioned right after the text lines
@@ -482,7 +482,6 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
     let input_display = format!(" {}_", &state.input_text);
     let input = Paragraph::new(input_display).style(
         Style::default()
-            .fg(theme.text)
             .add_modifier(Modifier::BOLD),
     );
     f.render_widget(input, input_area);
@@ -490,7 +489,7 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
     // Help bar
     let help_y = area.y + area.height - 1;
     let help = Paragraph::new("Enter: connect  |  Ctrl+C: exit")
-        .style(Style::default().fg(theme.secondary));
+        .style(Style::default().fg(theme.accent));
     f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 
@@ -505,7 +504,7 @@ fn draw_connecting(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, a
         Line::from("Please wait..."),
     ];
     let content = Paragraph::new(lines)
-        .style(Style::default().fg(theme.text))
+        .style(Style::default())
         .alignment(Alignment::Center);
     f.render_widget(content, area);
 }
@@ -523,12 +522,12 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
         )),
         Line::from(Span::styled(
             state.current_slot.description(),
-            Style::default().fg(theme.text),
+            Style::default(),
         )),
         Line::from(""),
     ];
 
-    let header_para = Paragraph::new(header).style(Style::default().fg(theme.text));
+    let header_para = Paragraph::new(header).style(Style::default());
     f.render_widget(header_para, area);
 
     let list_y = area.y + 3;
@@ -548,16 +547,16 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
             Line::from(""),
             Line::from(Span::styled(
                 "Type a model name and press Enter:",
-                Style::default().fg(theme.text),
+                Style::default(),
             )),
         ];
-        let para = Paragraph::new(no_model_lines).style(Style::default().fg(theme.text));
+        let para = Paragraph::new(no_model_lines).style(Style::default());
         f.render_widget(para, Rect::new(area.x, list_y, area.width, list_height));
 
         // Input
         let input_y = list_y + list_height.saturating_sub(3);
         let input = Paragraph::new(format!(" {}_", state.input_text))
-            .style(Style::default().fg(theme.text).add_modifier(Modifier::BOLD));
+            .style(Style::default().add_modifier(Modifier::BOLD));
         f.render_widget(input, Rect::new(area.x, input_y, area.width, 1));
     } else {
         // Model list
@@ -585,11 +584,10 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
 
             let style = if is_selected {
                 Style::default()
-                    .fg(theme.bg_sidebar)
                     .bg(theme.primary)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(theme.text)
+                Style::default()
             };
 
             list_lines.push(Line::from(vec![
@@ -599,7 +597,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
             ]));
         }
 
-        let list_para = Paragraph::new(list_lines).style(Style::default().fg(theme.text));
+        let list_para = Paragraph::new(list_lines).style(Style::default());
         f.render_widget(list_para, Rect::new(area.x, list_y, area.width, list_height));
     }
 
@@ -607,7 +605,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
     let selected_y = area.y + area.height - 3;
     let mut selected_lines = vec![Line::from(Span::styled(
         "Selected:",
-        Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+        Style::default().add_modifier(Modifier::BOLD),
     ))];
     for slot in &[ModelSlot::Fast, ModelSlot::Core, ModelSlot::Audit] {
         if let Some(ref name) = *state.selected_model_for_slot(*slot) {
@@ -625,13 +623,13 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
             )));
         }
     }
-    let sel_para = Paragraph::new(selected_lines).style(Style::default().fg(theme.text));
+    let sel_para = Paragraph::new(selected_lines).style(Style::default());
     f.render_widget(sel_para, Rect::new(area.x, selected_y, area.width, 3));
 
     // Help bar
     let help_y = area.y + area.height - 1;
     let help = Paragraph::new("Enter: select  |  Tab: skip  |  Esc: back")
-        .style(Style::default().fg(theme.secondary));
+        .style(Style::default().fg(theme.accent));
     f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 
@@ -645,7 +643,7 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Ollama URL: ", Style::default().fg(theme.text).add_modifier(Modifier::BOLD)),
+            Span::styled("  Ollama URL: ", Style::default().add_modifier(Modifier::BOLD)),
             Span::styled(&state.url, Style::default().fg(theme.primary)),
         ]),
         Line::from(""),
@@ -662,7 +660,7 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
         lines.push(Line::from(vec![
             Span::styled(
                 format!("  {:>12}: ", slot.label()),
-                Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
+                Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(model_display, Style::default().fg(theme.primary)),
         ]));
@@ -671,10 +669,10 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Enter: confirm and start  |  Esc: re-select models",
-        Style::default().fg(theme.text),
+        Style::default(),
     )));
 
-    let content = Paragraph::new(lines).style(Style::default().fg(theme.text));
+    let content = Paragraph::new(lines).style(Style::default());
     f.render_widget(content, area);
 }
 

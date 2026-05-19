@@ -3,60 +3,52 @@ use crate::config::ThemeColors;
 
 pub struct Theme {
     pub primary: Color,
-    pub secondary: Color,
-    pub bg_main: Color,
-    pub bg_sidebar: Color,
-    pub text: Color,
-    pub thinking: Color,
+    pub accent: Color,
     pub warning: Color,
-    pub error: Color,
-    #[allow(dead_code)]
-    pub sandbox: Color,
-    pub code_keyword: Color,
-    #[allow(dead_code)]
-    pub code_string: Color,
-    #[allow(dead_code)]
-    pub code_comment: Color,
-    #[allow(dead_code)]
-    pub success: Color,
 }
 
 impl Theme {
-    /// Build theme from config colors, falling back to defaults for unparseable values.
     pub fn from_config(colors: &ThemeColors) -> Self {
         Self {
-            primary: parse_color(&colors.primary).unwrap_or(Color::Rgb(0x67, 0xE8, 0xF9)),
-            secondary: parse_color(&colors.secondary).unwrap_or(Color::Rgb(0xA5, 0xF3, 0xFC)),
-            bg_main: parse_color(&colors.bg_main).unwrap_or(Color::Reset),
-            bg_sidebar: parse_color(&colors.bg_sidebar).unwrap_or(Color::Rgb(0x16, 0x4E, 0x63)),
-            text: parse_color(&colors.text).unwrap_or(Color::Rgb(0xE0, 0xF7, 0xFA)),
-            thinking: parse_color(&colors.thinking).unwrap_or(Color::Rgb(0x5E, 0xEA, 0xD4)),
-            warning: parse_color(&colors.warning).unwrap_or(Color::Rgb(0xFD, 0xE6, 0x8A)),
-            error: parse_color(&colors.error).unwrap_or(Color::Rgb(0xFC, 0xA5, 0xA5)),
-            sandbox: parse_color(&colors.sandbox).unwrap_or(Color::Rgb(0x67, 0xE8, 0xF9)),
-            code_keyword: parse_color(&colors.code_keyword).unwrap_or(Color::Rgb(0x67, 0xE8, 0xF9)),
-            code_string: parse_color(&colors.code_string).unwrap_or(Color::Rgb(0xA5, 0xF3, 0xFC)),
-            code_comment: parse_color(&colors.code_comment).unwrap_or(Color::Rgb(0xB0, 0xBE, 0xC5)),
-            success: parse_color(&colors.success).unwrap_or(Color::Rgb(0x6E, 0xE7, 0xB7)),
+            primary: parse_color(&colors.primary).unwrap_or(Color::Blue),
+            accent: parse_color(&colors.accent).unwrap_or(Color::Cyan),
+            warning: parse_color(&colors.warning).unwrap_or(Color::Yellow),
         }
     }
 
     pub fn mode_indicator(&self, mode: &crate::app::AppMode) -> (&'static str, Color) {
         match mode {
-            crate::app::AppMode::Plan => ("PLAN", self.thinking),
+            crate::app::AppMode::Plan => ("PLAN", self.accent),
             crate::app::AppMode::Edit => ("EDIT", self.primary),
             crate::app::AppMode::Auto => ("AUTO", self.warning),
         }
     }
 }
 
-/// Parse a hex color string like "#06B6D4" or the special value "reset".
-/// Returns None for unparseable strings.
 fn parse_color(s: &str) -> Option<Color> {
     let s = s.trim();
-    if s.eq_ignore_ascii_case("reset") {
-        return Some(Color::Reset);
+    match s.to_ascii_lowercase().as_str() {
+        "reset" => Some(Color::Reset),
+        "black" => Some(Color::Black),
+        "red" => Some(Color::Red),
+        "green" => Some(Color::Green),
+        "yellow" => Some(Color::Yellow),
+        "blue" => Some(Color::Blue),
+        "magenta" => Some(Color::Magenta),
+        "cyan" => Some(Color::Cyan),
+        "white" => Some(Color::White),
+        "gray" | "darkgray" => Some(Color::DarkGray),
+        "lightred" => Some(Color::LightRed),
+        "lightgreen" => Some(Color::LightGreen),
+        "lightyellow" => Some(Color::LightYellow),
+        "lightblue" => Some(Color::LightBlue),
+        "lightmagenta" => Some(Color::LightMagenta),
+        "lightcyan" => Some(Color::LightCyan),
+        _ => parse_hex(s),
     }
+}
+
+fn parse_hex(s: &str) -> Option<Color> {
     let hex = s.strip_prefix('#')?;
     if hex.len() != 6 {
         return None;
@@ -80,8 +72,9 @@ mod tests {
     #[test]
     fn default_theme_uses_config_colors() {
         let theme = Theme::default();
-        assert_eq!(theme.primary, parse_color(&ThemeColors::default().primary).unwrap());
-        assert_eq!(theme.bg_main, Color::Reset);
+        assert_eq!(theme.primary, Color::Blue);
+        assert_eq!(theme.accent, Color::Cyan);
+        assert_eq!(theme.warning, Color::Yellow);
     }
 
     #[test]
@@ -96,8 +89,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_color_ansi_names() {
+        assert_eq!(parse_color("blue"), Some(Color::Blue));
+        assert_eq!(parse_color("Blue"), Some(Color::Blue));
+        assert_eq!(parse_color("BLUE"), Some(Color::Blue));
+        assert_eq!(parse_color("cyan"), Some(Color::Cyan));
+        assert_eq!(parse_color("yellow"), Some(Color::Yellow));
+        assert_eq!(parse_color("red"), Some(Color::Red));
+        assert_eq!(parse_color("green"), Some(Color::Green));
+        assert_eq!(parse_color("magenta"), Some(Color::Magenta));
+        assert_eq!(parse_color("white"), Some(Color::White));
+        assert_eq!(parse_color("black"), Some(Color::Black));
+        assert_eq!(parse_color("reset"), Some(Color::Reset));
+        assert_eq!(parse_color("gray"), Some(Color::DarkGray));
+        assert_eq!(parse_color("darkgray"), Some(Color::DarkGray));
+        assert_eq!(parse_color("lightred"), Some(Color::LightRed));
+        assert_eq!(parse_color("lightyellow"), Some(Color::LightYellow));
+        assert_eq!(parse_color("lightcyan"), Some(Color::LightCyan));
+    }
+
+    #[test]
     fn parse_color_hex() {
-        assert_eq!(parse_color("#06B6D4"), Some(Color::Rgb(0x06, 0xB6, 0xD4)));
+        assert_eq!(parse_color("#315DFC"), Some(Color::Rgb(0x31, 0x5D, 0xFC)));
         assert_eq!(parse_color("#000000"), Some(Color::Rgb(0, 0, 0)));
         assert_eq!(parse_color("#FFFFFF"), Some(Color::Rgb(0xFF, 0xFF, 0xFF)));
     }
@@ -118,14 +131,23 @@ mod tests {
     }
 
     #[test]
-    fn from_config_uses_provided_colors() {
+    fn from_config_uses_ansi_names() {
+        let colors = ThemeColors {
+            primary: "red".into(),
+            ..ThemeColors::default()
+        };
+        let theme = Theme::from_config(&colors);
+        assert_eq!(theme.primary, Color::Red);
+    }
+
+    #[test]
+    fn from_config_uses_hex() {
         let colors = ThemeColors {
             primary: "#FF0000".into(),
             ..ThemeColors::default()
         };
         let theme = Theme::from_config(&colors);
         assert_eq!(theme.primary, Color::Rgb(0xFF, 0, 0));
-        assert_eq!(theme.bg_main, Color::Reset);
     }
 
     #[test]
@@ -135,6 +157,6 @@ mod tests {
             ..ThemeColors::default()
         };
         let theme = Theme::from_config(&colors);
-        assert_eq!(theme.primary, Color::Rgb(0x67, 0xE8, 0xF9)); // hardcoded fallback
+        assert_eq!(theme.primary, Color::Blue);
     }
 }
