@@ -20,7 +20,7 @@ pub struct ThemeColors {
 impl Default for ThemeColors {
     fn default() -> Self {
         Self {
-            primary: "blue".into(),
+            primary: "skyblue".into(),
             accent: "cyan".into(),
             warning: "yellow".into(),
         }
@@ -264,7 +264,7 @@ mod tests {
         assert!(config.validate().is_ok());
         assert_eq!(config.default_mode, "edit");
         assert_eq!(config.connect_timeout, 15);
-        assert_eq!(config.theme.primary, "blue");
+        assert_eq!(config.theme.primary, "skyblue");
     }
 
     #[test]
@@ -272,7 +272,7 @@ mod tests {
         let config = Config::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("[theme]"));
-        assert!(toml_str.contains("primary = \"blue\""));
+        assert!(toml_str.contains("primary = \"skyblue\""));
         assert!(toml_str.contains("accent = \"cyan\""));
     }
 

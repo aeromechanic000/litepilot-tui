@@ -126,22 +126,6 @@ fn run_app(
 
     let ollama_client = ollama::OllamaClient::new(&app_state.config)?;
 
-    // Populate sidebar file tree
-    {
-        let ctx = project::ProjectContext::new(app_state.workspace.clone());
-        let entries = ctx.list_tree();
-        let ui_entries: Vec<ui::FileEntry> = entries
-            .into_iter()
-            .map(|e| ui::FileEntry {
-                path: e.path.to_string_lossy().to_string(),
-                is_dir: e.is_dir,
-                depth: e.depth,
-                expanded: false,
-            })
-            .collect();
-        ui_state.set_file_tree(ui_entries);
-    }
-
     // Check Ollama connectivity in background
     let endpoint = app_state.config.ollama_endpoint.clone();
     let ping_result = std::thread::spawn(move || {
@@ -178,14 +162,17 @@ fn run_app(
             match result {
                 agent::retry::PipelineResult::Retry(r) => {
                     app_state.is_processing = false;
+                    ui_state.stop_thinking();
                     render_retry_result(&mut ui_state, r);
                 }
                 agent::retry::PipelineResult::AutoSuccess { changes, applied } => {
                     app_state.is_processing = false;
+                    ui_state.stop_thinking();
                     render_auto_result(&mut ui_state, &changes, &applied);
                 }
                 agent::retry::PipelineResult::AutoFailed { error } => {
                     app_state.is_processing = false;
+                    ui_state.stop_thinking();
                     ui_state.add_output(OutputLine::Error(format!("Pipeline failed: {}", error)));
                 }
                 agent::retry::PipelineResult::SearchDone { count, .. } => {
@@ -197,12 +184,15 @@ fn run_app(
                     continue; // Don't drain queue yet
                 }
                 agent::retry::PipelineResult::StreamChunk { content } => {
+                    // Remove thinking indicator on first chunk
+                    ui_state.stop_thinking();
                     // Append chunk to streaming output — don't mark processing done
                     ui_state.append_stream_chunk(&content);
                     continue;
                 }
                 agent::retry::PipelineResult::StreamDone { content } => {
                     app_state.is_processing = false;
+                    ui_state.stop_thinking();
                     ui_state.finish_stream();
                     // Check for file changes and show /apply hint
                     if !content.is_empty() {
@@ -224,13 +214,19 @@ fn run_app(
                     "Processing queued message...".to_string(),
                 ));
                 ui_state.add_output(OutputLine::User(next.clone()));
+                ui_state.start_thinking();
                 spawn_request_for_mode(&app_state, &ollama_client, &next, result_tx.clone());
                 app_state.is_processing = true;
             }
         }
 
         if event::poll(Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
+            let ev = event::read()?;
+            match ev {
+                Event::Paste(text) => {
+                    ui_state.set_paste(text);
+                }
+                Event::Key(key) => {
                 // Handle edit confirmation keys (y/n/a) when awaiting
                 if app_state.awaiting_confirmation && key.modifiers == KeyModifiers::NONE {
                     match key.code {
@@ -570,6 +566,7 @@ fn run_app(
                                         ui_state.add_output(OutputLine::Pending(label));
                                     } else {
                                         ui_state.add_output(OutputLine::User(input.clone()));
+                                        ui_state.start_thinking();
                                         spawn_skill_request(
                                             &app_state,
                                             &ollama_client,
@@ -592,6 +589,7 @@ fn run_app(
                             } else {
                                 // Display user message immediately and spawn background request
                                 ui_state.add_output(OutputLine::User(input.clone()));
+                                ui_state.start_thinking();
                                 spawn_request_for_mode(
                                     &app_state,
                                     &ollama_client,
@@ -606,10 +604,6 @@ fn run_app(
                     (KeyModifiers::NONE, KeyCode::Backspace) => {
                         ui_state.backspace();
                     }
-                    // Esc: toggle sidebar
-                    (KeyModifiers::NONE, KeyCode::Esc) => {
-                        ui_state.sidebar_visible = !ui_state.sidebar_visible;
-                    }
                     // Page Up: scroll chat up
                     (KeyModifiers::NONE, KeyCode::PageUp) => {
                         ui_state.scroll_up(10);
@@ -618,30 +612,14 @@ fn run_app(
                     (KeyModifiers::NONE, KeyCode::PageDown) => {
                         ui_state.scroll_down(10);
                     }
-                    // Tab: switch sidebar tab (only when sidebar visible)
-                    (KeyModifiers::NONE, KeyCode::Tab) => {
-                        if ui_state.sidebar_visible {
-                            ui_state.sidebar_switch_tab();
-                        }
-                    }
-                    // Up arrow in sidebar
-                    (KeyModifiers::NONE, KeyCode::Up) => {
-                        if ui_state.sidebar_visible {
-                            ui_state.sidebar_move_up();
-                        }
-                    }
-                    // Down arrow in sidebar
-                    (KeyModifiers::NONE, KeyCode::Down) => {
-                        if ui_state.sidebar_visible {
-                            ui_state.sidebar_move_down();
-                        }
-                    }
                     // Character input
                     (KeyModifiers::NONE, KeyCode::Char(c)) => {
                         ui_state.push_char(c);
                     }
                     _ => {}
                 }
+                }
+                _ => {}
             }
         }
     }

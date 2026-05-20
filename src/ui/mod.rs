@@ -15,23 +15,14 @@ pub struct UiState {
     pub input_cursor: usize,
     pub output_lines: Vec<OutputLine>,
     pub scroll_offset: u16,
-    pub sidebar_visible: bool,
-    pub sidebar_tab: SidebarTab,
-    pub sidebar_scroll: u16,
     pub auto_scroll: bool,
     /// Accumulates streaming tokens into the last Assistant output line
     pub streaming_buffer: String,
-    pub file_tree: Vec<FileEntry>,
-    pub sidebar_selection: usize,
     pub workspace_hint: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub struct FileEntry {
-    pub path: String,
-    pub is_dir: bool,
-    pub depth: usize,
-    pub expanded: bool,
+    /// Tick counter for animating the thinking indicator dots
+    pub thinking_tick: u8,
+    /// Stores full multi-line paste content; input_text shows the summary
+    paste_buffer: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,16 +41,8 @@ pub enum OutputLine {
         added: Vec<String>,
         removed: Vec<String>,
     },
-    #[allow(dead_code)]
-    Thinking(String),
+    Thinking(()),
     Pending(String),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum SidebarTab {
-    ProjectFiles,
-    #[allow(dead_code)]
-    CodeBase,
 }
 
 impl Default for UiState {
@@ -70,14 +53,11 @@ impl Default for UiState {
             input_cursor: 0,
             output_lines: Vec::new(),
             scroll_offset: 0,
-            sidebar_visible: true,
-            sidebar_tab: SidebarTab::ProjectFiles,
-            sidebar_scroll: 0,
             auto_scroll: true,
             streaming_buffer: String::new(),
-            file_tree: Vec::new(),
-            sidebar_selection: 0,
             workspace_hint: PathBuf::new(),
+            thinking_tick: 0,
+            paste_buffer: None,
         }
     }
 }
@@ -122,6 +102,26 @@ impl UiState {
         }
     }
 
+    /// Add a Thinking indicator line below the last user message.
+    pub fn start_thinking(&mut self) {
+        self.output_lines.push(OutputLine::Thinking(()));
+        self.thinking_tick = 0;
+        if self.auto_scroll {
+            self.scroll_to_bottom();
+        }
+    }
+
+    /// Remove the last Thinking line (if present) before replacing with response.
+    /// Returns true if a Thinking line was removed.
+    pub fn stop_thinking(&mut self) -> bool {
+        if matches!(self.output_lines.last(), Some(OutputLine::Thinking(()))) {
+            self.output_lines.pop();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Finish streaming — finalizes the buffer. Returns the full content.
     pub fn finish_stream(&mut self) -> String {
         let content = std::mem::take(&mut self.streaming_buffer);
@@ -144,11 +144,18 @@ impl UiState {
     }
 
     pub fn push_char(&mut self, c: char) {
+        self.paste_buffer = None;
         self.input_text.insert(self.input_cursor, c);
         self.input_cursor += c.len_utf8();
     }
 
     pub fn backspace(&mut self) {
+        if self.paste_buffer.is_some() {
+            self.paste_buffer = None;
+            self.input_text.clear();
+            self.input_cursor = 0;
+            return;
+        }
         if self.input_cursor > 0 {
             let prev = self.input_text[..self.input_cursor]
                 .chars()
@@ -161,10 +168,27 @@ impl UiState {
     }
 
     pub fn take_input(&mut self) -> String {
-        let input = self.input_text.clone();
+        let input = self.paste_buffer.take().unwrap_or_else(|| self.input_text.clone());
         self.input_text.clear();
         self.input_cursor = 0;
         input
+    }
+
+    /// Handle pasted text. Multi-line pastes show a summary in the input field
+    /// while storing the full content for submission.
+    pub fn set_paste(&mut self, text: String) {
+        let line_count = text.lines().count();
+        if line_count > 1 {
+            self.paste_buffer = Some(text);
+            self.input_text = format!("[{} copied lines]", line_count);
+            self.input_cursor = self.input_text.len();
+        } else {
+            self.paste_buffer = None;
+            for c in text.chars() {
+                self.input_text.insert(self.input_cursor, c);
+                self.input_cursor += c.len_utf8();
+            }
+        }
     }
 
     pub fn scroll_up(&mut self, amount: u16) {
@@ -181,58 +205,31 @@ impl UiState {
         // scroll_offset will be clamped during render
         self.scroll_offset = u16::MAX;
     }
-
-    pub fn set_file_tree(&mut self, entries: Vec<FileEntry>) {
-        self.file_tree = entries;
-        if self.sidebar_selection >= self.file_tree.len() && !self.file_tree.is_empty() {
-            self.sidebar_selection = self.file_tree.len().saturating_sub(1);
-        }
-    }
-
-    pub fn sidebar_move_up(&mut self) {
-        if self.sidebar_selection > 0 {
-            self.sidebar_selection -= 1;
-        }
-    }
-
-    pub fn sidebar_move_down(&mut self) {
-        if self.sidebar_selection + 1 < self.file_tree.len() {
-            self.sidebar_selection += 1;
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn sidebar_toggle_expand(&mut self) {
-        if self.sidebar_selection < self.file_tree.len() {
-            self.file_tree[self.sidebar_selection].expanded =
-                !self.file_tree[self.sidebar_selection].expanded;
-        }
-    }
-
-    pub fn sidebar_switch_tab(&mut self) {
-        self.sidebar_tab = match self.sidebar_tab {
-            SidebarTab::ProjectFiles => SidebarTab::CodeBase,
-            SidebarTab::CodeBase => SidebarTab::ProjectFiles,
-        };
-        self.sidebar_selection = 0;
-        self.sidebar_scroll = 0;
-    }
 }
 
 pub fn draw(f: &mut Frame, app: &AppState, ui: &mut UiState) {
     let size = f.area();
+
+    // Calculate dynamic input height: grows with content, capped at 40% of terminal
+    let input_content_lines = estimate_input_lines(&ui.input_text, size.width);
+    let max_input = (size.height / 5).max(4).min(15); // 20% of terminal, min 4, max 15
+    let input_height = (input_content_lines + 1).max(3).min(max_input);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // status bar
-            Constraint::Min(5),    // main area
-            Constraint::Length(3), // input area
+            Constraint::Length(1),         // status bar
+            Constraint::Min(5),            // main area
+            Constraint::Length(input_height), // input area
         ])
         .split(size);
 
     draw_status_bar(f, app, ui, chunks[0]);
     draw_main_area(f, app, ui, chunks[1]);
-    draw_input_area(f, ui, chunks[2]);
+
+    let visible_content_rows = chunks[2].height.saturating_sub(1) as usize; // -1 for border
+    let has_overflow = input_content_lines as usize > visible_content_rows;
+    draw_input_area(f, ui, chunks[2], has_overflow);
 }
 
 fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
@@ -277,21 +274,12 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
         )),
     ];
 
-    if app.is_processing {
+    if !app.pending_queue.is_empty() {
         spans.push(Span::raw(" | "));
         spans.push(Span::styled(
-            "thinking...",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            format!("({} queued)", app.pending_queue.len()),
+            Style::default().fg(theme.accent),
         ));
-        if !app.pending_queue.is_empty() {
-            spans.push(Span::raw(" "));
-            spans.push(Span::styled(
-                format!("({} queued)", app.pending_queue.len()),
-                Style::default().fg(theme.accent),
-            ));
-        }
     }
 
     let status = Paragraph::new(Line::from(spans));
@@ -301,15 +289,15 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
 fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) {
     let theme = &ui.theme;
 
-    let (main_area, sidebar_area) = if ui.sidebar_visible && area.width > 60 {
-        let split = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
-            .split(area);
-        (split[0], Some(split[1]))
-    } else {
-        (area, None)
-    };
+    // Animate thinking dots when a Thinking line is present
+    let has_thinking = ui
+        .output_lines
+        .iter()
+        .any(|ol| matches!(ol, OutputLine::Thinking(_)));
+    if has_thinking {
+        ui.thinking_tick = ui.thinking_tick.wrapping_add(1);
+    }
+    let tick = ui.thinking_tick;
 
     // Main output panel
     let lines: Vec<Line> = ui
@@ -318,7 +306,7 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
         .flat_map(|ol| match ol {
             OutputLine::User(text) => vec![Line::from(Span::styled(
                 format!("> {}", text),
-                Style::default().fg(theme.primary),
+                Style::default(),
             ))],
             OutputLine::Assistant(text) => render_markdown(text, theme),
             OutputLine::System(text) => vec![Line::from(Span::styled(
@@ -330,10 +318,15 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
                 Style::default().fg(theme.warning),
             ))],
             OutputLine::Code { language, code } => render_code_block(language, code, theme),
-            OutputLine::Thinking(text) => vec![Line::from(Span::styled(
-                format!("thinking: {}", text),
-                Style::default().fg(theme.accent),
-            ))],
+            OutputLine::Thinking(_) => {
+                let dots = ".".repeat(((tick / 4) % 3 + 1) as usize);
+                vec![Line::from(Span::styled(
+                    format!("  thinking{}", dots),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::ITALIC),
+                ))]
+            }
             OutputLine::Pending(text) => vec![Line::from(Span::styled(
                 format!("> {} (queued)", text),
                 Style::default().fg(theme.accent),
@@ -343,7 +336,7 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
         .collect();
 
     let total_lines = lines.len() as u16;
-    let visible_height = main_area.height;
+    let visible_height = area.height;
     let max_scroll = total_lines.saturating_sub(visible_height);
     if ui.scroll_offset > max_scroll {
         ui.scroll_offset = max_scroll;
@@ -352,93 +345,7 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
     let output = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((ui.scroll_offset, 0));
-    f.render_widget(output, main_area);
-
-    // Sidebar
-    if let Some(sidebar_area) = sidebar_area {
-        draw_sidebar(f, ui, sidebar_area);
-    }
-}
-
-fn draw_sidebar(f: &mut Frame, ui: &UiState, area: Rect) {
-    let theme = &ui.theme;
-
-    let tab_label = match ui.sidebar_tab {
-        SidebarTab::ProjectFiles => "Project Files",
-        SidebarTab::CodeBase => "Code Base",
-    };
-
-    let header = Line::from(Span::styled(
-        format!(" {} ", tab_label),
-        Style::default()
-            .fg(theme.primary)
-            .add_modifier(Modifier::BOLD),
-    ));
-
-    let mut lines: Vec<Line> = vec![header, Line::raw("")];
-
-    match ui.sidebar_tab {
-        SidebarTab::ProjectFiles => {
-            if ui.file_tree.is_empty() {
-                lines.push(Line::raw("  (empty)"));
-            } else {
-                let visible_height = area.height.saturating_sub(4) as usize;
-                let start = ui.sidebar_scroll as usize;
-                let end = std::cmp::min(start + visible_height, ui.file_tree.len());
-
-                for (i, entry) in ui.file_tree[start..end].iter().enumerate() {
-                    let actual_idx = start + i;
-                    let is_selected = actual_idx == ui.sidebar_selection;
-
-                    let indent = "  ".repeat(entry.depth);
-                    let icon = if entry.is_dir {
-                        if entry.expanded {
-                            "v "
-                        } else {
-                            "> "
-                        }
-                    } else {
-                        "  "
-                    };
-                    let name = entry.path.rsplit('/').next().unwrap_or(&entry.path);
-
-                    let style = if is_selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme.primary)
-                            .add_modifier(Modifier::BOLD)
-                    } else if entry.is_dir {
-                        Style::default().fg(theme.primary)
-                    } else {
-                        Style::default()
-                    };
-
-                    lines.push(Line::from(Span::styled(
-                        format!("{}{}{}", indent, icon, name),
-                        style,
-                    )));
-                }
-            }
-        }
-        SidebarTab::CodeBase => {
-            lines.push(Line::raw("  Built-in templates"));
-            lines.push(Line::raw("  (see /skills)"));
-        }
-    }
-
-    // Footer hint
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        " Tab:switch | Enter:toggle ",
-        Style::default().fg(theme.accent),
-    )));
-
-    let sidebar = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::LEFT)
-            .border_style(Style::default().fg(theme.primary)),
-    );
-    f.render_widget(sidebar, area);
+    f.render_widget(output, area);
 }
 
 /// Render assistant text with basic markdown formatting.
@@ -451,25 +358,19 @@ fn render_markdown<'a>(text: &'a str, theme: &'a Theme) -> Vec<Line<'a>> {
             if trimmed.starts_with("### ") {
                 return Line::from(Span::styled(
                     trimmed.to_string(),
-                    Style::default()
-                        .fg(theme.primary)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().add_modifier(Modifier::BOLD),
                 ));
             }
             if trimmed.starts_with("## ") {
                 return Line::from(Span::styled(
                     trimmed.to_string(),
-                    Style::default()
-                        .fg(theme.primary)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().add_modifier(Modifier::BOLD),
                 ));
             }
             if trimmed.starts_with("# ") {
                 return Line::from(Span::styled(
                     trimmed.to_string(),
-                    Style::default()
-                        .fg(theme.primary)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().add_modifier(Modifier::BOLD),
                 ));
             }
 
@@ -501,7 +402,7 @@ fn render_markdown<'a>(text: &'a str, theme: &'a Theme) -> Vec<Line<'a>> {
         .collect()
 }
 
-fn render_inline_code<'a>(line: &'a str, theme: &'a Theme) -> Line<'a> {
+fn render_inline_code<'a>(line: &'a str, _theme: &'a Theme) -> Line<'a> {
     let mut spans = Vec::new();
     let mut in_code = false;
     let mut current = String::new();
@@ -510,7 +411,7 @@ fn render_inline_code<'a>(line: &'a str, theme: &'a Theme) -> Line<'a> {
         if ch == '`' {
             if !current.is_empty() {
                 let style = if in_code {
-                    Style::default().fg(theme.primary)
+                    Style::default().add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -523,7 +424,7 @@ fn render_inline_code<'a>(line: &'a str, theme: &'a Theme) -> Line<'a> {
     }
     if !current.is_empty() {
         let style = if in_code {
-            Style::default().fg(theme.primary)
+            Style::default().add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -622,9 +523,48 @@ fn render_diff<'a>(added: &[String], removed: &[String], _theme: &'a Theme) -> V
     lines
 }
 
-fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect) {
+fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect, has_overflow: bool) {
     let theme = &ui.theme;
-    let input = Paragraph::new(ui.input_text.as_str()).block(
+    let text_width = area.width.saturating_sub(3) as usize; // " > " takes 3 cols
+    let visible_rows = area.height.saturating_sub(1) as usize; // -1 for border
+
+    let wrapped = wrap_input_text(&ui.input_text, text_width);
+
+    let mut para_lines: Vec<Line> = Vec::new();
+
+    // Determine how many lines we can actually show
+    let show_count = if has_overflow {
+        visible_rows.saturating_sub(1) // reserve last row for overflow indicator
+    } else {
+        wrapped.len()
+    };
+
+    for (i, chunk) in wrapped.iter().enumerate() {
+        if i >= show_count {
+            break;
+        }
+        if i == 0 {
+            para_lines.push(Line::from(vec![
+                Span::styled(" > ", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(chunk.clone()),
+            ]));
+        } else {
+            para_lines.push(Line::from(vec![
+                Span::raw("   "),
+                Span::raw(chunk.clone()),
+            ]));
+        }
+    }
+
+    if has_overflow {
+        let hidden = wrapped.len() - show_count;
+        para_lines.push(Line::from(Span::styled(
+            format!("   ... {} more line(s)", hidden),
+            Style::default().add_modifier(Modifier::DIM),
+        )));
+    }
+
+    let input = Paragraph::new(para_lines).block(
         Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(theme.primary))
@@ -634,6 +574,42 @@ fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect) {
             )),
     );
     f.render_widget(input, area);
+}
+
+/// Break text into lines that fit within `width` characters.
+fn wrap_input_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+
+    let mut lines = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        current.push(ch);
+        if current.chars().count() >= width {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+
+    lines
+}
+
+/// Estimate how many content lines the input text will occupy when wrapped.
+fn estimate_input_lines(text: &str, area_width: u16) -> u16 {
+    if area_width <= 3 {
+        return 1;
+    }
+    let text_width = (area_width - 3) as usize;
+    if text_width == 0 {
+        return 1;
+    }
+    let char_count = text.chars().count();
+    ((char_count + text_width - 1) / text_width).max(1) as u16
 }
 
 fn truncate_model_name(name: &str, max: usize) -> String {
@@ -712,50 +688,6 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_tab_switch() {
-        let mut ui = UiState::default();
-        assert_eq!(ui.sidebar_tab, SidebarTab::ProjectFiles);
-        ui.sidebar_switch_tab();
-        assert_eq!(ui.sidebar_tab, SidebarTab::CodeBase);
-        ui.sidebar_switch_tab();
-        assert_eq!(ui.sidebar_tab, SidebarTab::ProjectFiles);
-    }
-
-    #[test]
-    fn sidebar_navigation() {
-        let mut ui = UiState::default();
-        ui.file_tree = vec![
-            FileEntry {
-                path: "a".into(),
-                is_dir: true,
-                depth: 0,
-                expanded: false,
-            },
-            FileEntry {
-                path: "b".into(),
-                is_dir: false,
-                depth: 0,
-                expanded: false,
-            },
-            FileEntry {
-                path: "c".into(),
-                is_dir: false,
-                depth: 0,
-                expanded: false,
-            },
-        ];
-        assert_eq!(ui.sidebar_selection, 0);
-        ui.sidebar_move_down();
-        assert_eq!(ui.sidebar_selection, 1);
-        ui.sidebar_move_down();
-        assert_eq!(ui.sidebar_selection, 2);
-        ui.sidebar_move_down(); // at end, no move
-        assert_eq!(ui.sidebar_selection, 2);
-        ui.sidebar_move_up();
-        assert_eq!(ui.sidebar_selection, 1);
-    }
-
-    #[test]
     fn truncate_model() {
         assert_eq!(truncate_model_name("qwen3:4b", 12), "qwen3:4b");
         assert_eq!(
@@ -771,12 +703,6 @@ mod tests {
         let truncated = truncate_path(long, 15);
         assert!(truncated.starts_with("..."));
         assert!(truncated.len() <= 15);
-    }
-
-    #[test]
-    fn sidebar_tab_default() {
-        let ui = UiState::default();
-        assert_eq!(ui.sidebar_tab, SidebarTab::ProjectFiles);
     }
 
     #[test]

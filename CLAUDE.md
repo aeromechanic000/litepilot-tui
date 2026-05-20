@@ -615,7 +615,7 @@ enable_free_web_search = true
 search_cache_valid_days = 30
 
 [theme]
-primary = "blue"
+primary = "green"
 accent = "cyan"
 warning = "yellow"
 ```

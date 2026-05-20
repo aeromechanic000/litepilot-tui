@@ -282,6 +282,41 @@ connect_timeout = "10s"
 
 Place a `.litepilot/config.toml` in your project root to override global settings for that project.
 
+### Theme Colors
+
+The `[theme]` section accepts named colors or hex values:
+
+```toml
+[theme]
+primary = "green"    # Main UI color (mode indicator, headers, highlights)
+accent = "cyan"      # Secondary color (system messages, thinking indicator)
+warning = "yellow"   # Error and warning color
+```
+
+#### Standard ANSI Colors
+
+`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, `reset` (terminal default)
+
+Light variants: `lightred`, `lightgreen`, `lightyellow`, `lightblue`, `lightmagenta`, `lightcyan`, `gray` (or `darkgray`)
+
+#### Extended Named Colors
+
+Each color family includes at least 9 shades:
+
+| Family | Colors |
+|--------|--------|
+| **Reds** | `crimson`, `firebrick`, `darkred`, `indianred`, `orangered`, `tomato`, `coral`, `salmon`, `darksalmon`, `rosybrown` |
+| **Greens** | `lime`, `forestgreen`, `seagreen`, `springgreen`, `limegreen`, `palegreen`, `darkgreen`, `olive`, `olivedrab`, `chartreuse` |
+| **Blues** | `navy`, `steelblue`, `cornflowerblue`, `dodgerblue`, `royalblue`, `deepskyblue`, `mediumblue`, `slateblue`, `skyblue`, `powderblue` |
+| **Yellows / Oranges** | `gold`, `orange`, `darkorange`, `goldenrod`, `darkgoldenrod`, `khaki`, `amber`, `peach`, `apricot`, `wheat` |
+| **Purples / Pinks** | `violet`, `plum`, `orchid`, `purple`, `hotpink`, `deeppink`, `mediumvioletred`, `palevioletred`, `fuchsia`, `lavender` |
+| **Cyans / Teals** | `teal`, `turquoise`, `aquamarine`, `darkcyan`, `cadetblue`, `mediumturquoise`, `paleturquoise`, `lightseagreen`, `darkturquoise`, `mediumaquamarine` |
+| **Neutrals** | `silver`, `slategray`, `lightslategray`, `dimgray`, `gainsboro`, `whitesmoke`, `midnightblue`, `snow`, `ivory`, `seashell` |
+
+#### Hex Colors
+
+Any 6-digit hex value works: `primary = "#FF6600"`
+
 ### Custom Skills
 
 Create a markdown file in `~/.litepilot/skills/` with YAML frontmatter:
