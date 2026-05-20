@@ -31,28 +31,28 @@ This trade-off comes with real consequences: local 3–14B parameter models are 
 
 ### Feature Comparison
 
-| Feature | LitePilot | Claude Code | Codex (OpenAI) | Cursor | Copilot | Aider |
-|---------|-----------|-------------|----------------|--------|---------|-------|
-| **Runtime** | Local (Ollama) | Cloud API | Cloud API | Cloud API | Cloud API | Cloud API |
-| **Privacy** | Full — no data leaves machine | Sends to Anthropic | Sends to OpenAI | Sends to OpenAI/other | Sends to GitHub/OpenAI | Sends to configured API |
-| **Cost** | Free (hardware only) | $0.01–0.10/query | $0.01–0.05/query | $20/mo or API costs | $10–19/mo | API costs |
+| Feature | LitePilot | Claude Code | Codex (OpenAI) | Cursor | Copilot | 
+|---------|-----------|-------------|----------------|--------|---------|
+| **Runtime** | Local (Ollama) | Cloud API | Cloud API | Cloud API | Cloud API | 
+| **Privacy** | Full — no data leaves machine | Sends to Anthropic | Sends to OpenAI | Sends to OpenAI/other | Sends to GitHub/OpenAI | 
+| **Cost** | Free (hardware only) | $0.01–0.10/query | $0.01–0.05/query | $20/mo or API costs | $10–19/mo | 
 | **Offline** | Yes | No | No | No | No | No |
-| **Interface** | Terminal (TUI) | Terminal (CLI) | Cloud IDE + CLI | IDE (VS Code fork) | IDE extension | Terminal (CLI) |
-| **Streaming** | Yes (SSE) | Yes | Yes | Yes | Yes | Yes |
-| **Multi-file edits** | Yes | Yes | Yes | Yes | Partial | Yes |
-| **Auto-apply** | Yes (Auto mode) | Yes | Yes | Yes | Yes (inline) | Yes |
-| **Confirmation flow** | Plan/Edit/Auto modes | Per-action | Per-task | Inline diff | Inline suggestion | Per-file |
-| **Sandbox** | Path validation + cmd filter | Container | Sandbox | N/A | N/A | N/A |
-| **Web search** | Yes (DuckDuckGo) | Yes | Yes | Yes | Partial | Via MCP |
-| **Codebase context** | Built-in templates + RAG | CLAUDE.md + memory | Repo indexing | Repo indexing | Workspace indexing | Repo map |
-| **Session persistence** | Yes | Yes | Yes | No | No | Yes |
-| **Custom skills/commands** | Yes (markdown) | Yes (hooks) | No | Rules files | No | Via commands |
-| **Context window** | Model-dependent (2K–32K) | 200K | 128K+ | Model-dependent | Model-dependent | Model-dependent |
-| **First-token latency** | 2–8s (local) | 1–3s (cloud) | 1–3s (cloud) | 1–3s (cloud) | <1s (cloud) | 1–3s (cloud) |
-| **Code quality (complex tasks)** | Good | Excellent | Excellent | Excellent | Good | Good |
-| **Code quality (simple tasks)** | Good | Excellent | Excellent | Excellent | Good | Good |
-| **Large refactoring** | Moderate | Excellent | Good | Excellent | Moderate | Good |
-| **Cross-file reasoning** | Limited | Excellent | Good | Good | Limited | Good |
+| **Interface** | Terminal (TUI) | Terminal (CLI) | Cloud IDE + CLI | IDE (VS Code fork) | IDE extension | 
+| **Streaming** | Yes (SSE) | Yes | Yes | Yes | Yes | 
+| **Multi-file edits** | Yes | Yes | Yes | Yes | Partial | 
+| **Auto-apply** | Yes (Auto mode) | Yes | Yes | Yes | Yes (inline) | 
+| **Confirmation flow** | Plan/Edit/Auto modes | Per-action | Per-task | Inline diff | Inline suggestion | 
+| **Sandbox** | Path validation + cmd filter | Container | Sandbox | N/A | N/A | 
+| **Web search** | Yes (DuckDuckGo) | Yes | Yes | Yes | Partial | 
+| **Codebase context** | Built-in templates + RAG | CLAUDE.md + memory | Repo indexing | Repo indexing | Workspace indexing | 
+| **Session persistence** | Yes | Yes | Yes | No | No | 
+| **Custom skills/commands** | Yes (markdown) | Yes (hooks) | No | Rules files | No | 
+| **Context window** | Model-dependent (2K–32K) | 200K | 128K+ | Model-dependent | Model-dependent | 
+| **First-token latency** | 2–8s (local) | 1–3s (cloud) | 1–3s (cloud) | 1–3s (cloud) | <1s (cloud) | 
+| **Code quality (complex tasks)** | Good | Excellent | Excellent | Excellent | Good | 
+| **Code quality (simple tasks)** | Good | Excellent | Excellent | Excellent | Good | 
+| **Large refactoring** | Moderate | Excellent | Good | Excellent | Moderate | 
+| **Cross-file reasoning** | Limited | Excellent | Good | Good | Limited | 
 
 ### Advantages Over Cloud Agents
 
