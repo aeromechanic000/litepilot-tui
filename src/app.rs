@@ -58,18 +58,30 @@ pub struct AppState {
     pub config: Config,
     pub workspace: PathBuf,
     pub web_search_enabled: bool,
-    #[allow(dead_code)]
     pub pending_confirmations: Vec<PendingAction>,
+    pub awaiting_confirmation: bool,
     pub input_history: Vec<String>,
     pub skills: SkillRegistry,
+    pub is_processing: bool,
+    pub pending_queue: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum PendingAction {
-    WriteFile { path: PathBuf, content: String, diff_preview: String },
-    DeleteFile { path: PathBuf },
-    ExecuteCommand { cmd: String, args: Vec<String> },
+    WriteFile {
+        path: PathBuf,
+        content: String,
+        #[allow(dead_code)]
+        diff_preview: String,
+    },
+    DeleteFile {
+        path: PathBuf,
+    },
+    #[allow(dead_code)]
+    ExecuteCommand {
+        cmd: String,
+        args: Vec<String>,
+    },
 }
 
 impl AppState {
@@ -86,8 +98,11 @@ impl AppState {
             workspace,
             web_search_enabled: config.enable_free_web_search,
             pending_confirmations: Vec::new(),
+            awaiting_confirmation: false,
             input_history: Vec::new(),
             skills,
+            is_processing: false,
+            pending_queue: Vec::new(),
         }
     }
 
@@ -96,7 +111,6 @@ impl AppState {
         self.mode
     }
 
-    #[allow(dead_code)]
     pub fn push_pending(&mut self, action: PendingAction) {
         self.pending_confirmations.push(action);
     }
@@ -106,7 +120,6 @@ impl AppState {
         self.pending_confirmations.pop()
     }
 
-    #[allow(dead_code)]
     pub fn clear_pending(&mut self) {
         self.pending_confirmations.clear();
     }

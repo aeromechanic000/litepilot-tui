@@ -4,7 +4,6 @@ use anyhow::Result;
 use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)]
 pub enum SyntaxResult {
     Pass,
     Fail { errors: String },
@@ -12,7 +11,6 @@ pub enum SyntaxResult {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum Language {
     Python,
     JavaScript,
@@ -24,7 +22,6 @@ pub enum Language {
     Cpp,
 }
 
-#[allow(dead_code)]
 impl Language {
     pub fn check_command(&self) -> (&'static str, Vec<&'static str>) {
         match self {
@@ -54,10 +51,8 @@ impl Language {
     }
 }
 
-#[allow(dead_code)]
 pub struct SyntaxChecker;
 
-#[allow(dead_code)]
 impl SyntaxChecker {
     pub fn detect_language(path: &Path) -> Option<Language> {
         let ext = path.extension()?.to_str()?;
@@ -74,7 +69,8 @@ impl SyntaxChecker {
         }
 
         let (cmd, template) = lang.check_command();
-        let args: Vec<String> = template.iter()
+        let args: Vec<String> = template
+            .iter()
             .map(|a| a.replace("{}", &path.to_string_lossy()))
             .collect();
 
@@ -85,7 +81,9 @@ impl SyntaxChecker {
             Ok(SyntaxResult::Pass)
         } else {
             Ok(SyntaxResult::Fail {
-                errors: format!("{}\n{}", output.stdout, output.stderr).trim().to_string(),
+                errors: format!("{}\n{}", output.stdout, output.stderr)
+                    .trim()
+                    .to_string(),
             })
         }
     }
@@ -98,9 +96,18 @@ mod tests {
 
     #[test]
     fn detect_language_from_extension() {
-        assert!(matches!(Language::from_extension("py"), Some(Language::Python)));
-        assert!(matches!(Language::from_extension("rs"), Some(Language::Rust)));
-        assert!(matches!(Language::from_extension("js"), Some(Language::JavaScript)));
+        assert!(matches!(
+            Language::from_extension("py"),
+            Some(Language::Python)
+        ));
+        assert!(matches!(
+            Language::from_extension("rs"),
+            Some(Language::Rust)
+        ));
+        assert!(matches!(
+            Language::from_extension("js"),
+            Some(Language::JavaScript)
+        ));
         assert!(matches!(Language::from_extension("go"), Some(Language::Go)));
         assert!(matches!(Language::from_extension("txt"), None));
     }
@@ -108,7 +115,10 @@ mod tests {
     #[test]
     fn detect_language_from_path() {
         let path = Path::new("src/main.rs");
-        assert!(matches!(SyntaxChecker::detect_language(path), Some(Language::Rust)));
+        assert!(matches!(
+            SyntaxChecker::detect_language(path),
+            Some(Language::Rust)
+        ));
     }
 
     #[tokio::test]
@@ -120,8 +130,8 @@ mod tests {
         let result = SyntaxChecker::check(&file, &sandbox).await;
         assert!(result.is_ok());
         match result.unwrap() {
-            SyntaxResult::Pass | SyntaxResult::Skipped(_) => {},
-            SyntaxResult::Fail { .. } => {}, // python3 might not be installed
+            SyntaxResult::Pass | SyntaxResult::Skipped(_) => {}
+            SyntaxResult::Fail { .. } => {} // python3 might not be installed
         }
     }
 
@@ -129,7 +139,9 @@ mod tests {
     async fn check_nonexistent_file() {
         let dir = TempDir::new().unwrap();
         let sandbox = Sandbox::new(dir.path().to_path_buf());
-        let result = SyntaxChecker::check(Path::new("nonexistent.py"), &sandbox).await.unwrap();
+        let result = SyntaxChecker::check(Path::new("nonexistent.py"), &sandbox)
+            .await
+            .unwrap();
         assert!(matches!(result, SyntaxResult::Skipped(_)));
     }
 }

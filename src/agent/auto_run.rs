@@ -1,17 +1,16 @@
+use crate::agent::syntax::SyntaxChecker;
 use crate::agent::{AgentPipeline, FileChange};
-use crate::ollama::OllamaClient;
-use crate::config::Config;
-use crate::sandbox::Sandbox;
-use crate::project::file_ops::FileOps;
 use crate::app::AppMode;
 use crate::codebase::CodeBase;
+use crate::config::Config;
+use crate::ollama::OllamaClient;
+use crate::project::file_ops::FileOps;
+use crate::sandbox::Sandbox;
 use anyhow::Result;
 use std::path::PathBuf;
 
-#[allow(dead_code)]
 const MAX_RETRIES: usize = 2;
 
-#[allow(dead_code)]
 pub async fn run_auto_pipeline(
     client: &OllamaClient,
     config: &Config,
@@ -26,11 +25,12 @@ pub async fn run_auto_pipeline(
 
     // Step 1: Plan (with template retrieval if codebase available)
     let (plan, template_refs) = if let Some(cb) = codebase {
-        let plan = pipeline.plan_with_templates(user_request, project_context, cb).await?;
-        let loaded = crate::codebase::retrieval::retrieve(
-            client, config, cb, user_request, project_context,
-        )
-        .await;
+        let plan = pipeline
+            .plan_with_templates(user_request, project_context, cb)
+            .await?;
+        let loaded =
+            crate::codebase::retrieval::retrieve(client, config, cb, user_request, project_context)
+                .await;
         (plan, loaded.refs)
     } else {
         let plan = pipeline.plan(user_request, project_context).await?;
@@ -42,7 +42,9 @@ pub async fn run_auto_pipeline(
     let mut final_changes = Vec::new();
 
     while attempts <= MAX_RETRIES {
-        let changes = pipeline.implement(&plan, project_context, &template_refs).await?;
+        let changes = pipeline
+            .implement(&plan, project_context, &template_refs)
+            .await?;
 
         if changes.is_empty() {
             break;
@@ -57,6 +59,33 @@ pub async fn run_auto_pipeline(
                 let fc = file_ops.prepare_write(&change.path, &change.content)?;
                 file_ops.apply_change(&fc)?;
             }
+
+            // Run syntax checks on all applied files
+            let mut syntax_errors = Vec::new();
+            for change in &changes {
+                let full_path = workspace.join(&change.path);
+                if let Ok(crate::agent::syntax::SyntaxResult::Fail { errors }) =
+                    SyntaxChecker::check(&full_path, sandbox).await
+                {
+                    syntax_errors.push((change.path.to_string_lossy().to_string(), errors));
+                }
+            }
+
+            if !syntax_errors.is_empty() {
+                // Feed syntax errors back for correction on next attempt
+                let _error_summary: String = syntax_errors
+                    .iter()
+                    .map(|(path, err)| format!("{}:\n{}", path, err))
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+
+                attempts += 1;
+                if attempts <= MAX_RETRIES {
+                    // TODO: feed error_summary back into implement step
+                    // For now, just report the errors and keep the applied files
+                }
+            }
+
             final_changes = changes;
             break;
         }

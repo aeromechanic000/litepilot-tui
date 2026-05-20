@@ -1,12 +1,12 @@
 [package]
-name = "litecode-tui"
+name = "litepilot-tui"
 version = "0.1.0"
 edition = "2021"
 description = "Terminal AI coding assistant powered by Ollama-host local models"
 license = "MIT"
 
 [[bin]]
-name = "litecode"
+name = "litepilot"
 path = "src/main.rs"
 
 [dependencies]

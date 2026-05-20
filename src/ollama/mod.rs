@@ -31,6 +31,10 @@ impl OllamaClient {
         &self.endpoint
     }
 
+    pub fn http_client(self) -> Client {
+        self.http
+    }
+
     pub async fn ping(&self) -> Result<()> {
         let url = format!("{}/api/tags", self.endpoint);
         let resp = self
@@ -70,7 +74,11 @@ impl OllamaClient {
 
         let mut result = Vec::new();
         for m in models {
-            let name = m.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = m
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let size = m.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             let quantization_level = m
                 .get("details")

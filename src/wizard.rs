@@ -250,9 +250,8 @@ fn try_connect(state: &mut WizardState) {
     match result {
         Ok(models) => {
             if models.is_empty() {
-                state.error_msg = Some(
-                    "No models found. Pull models with: ollama pull <model>".into(),
-                );
+                state.error_msg =
+                    Some("No models found. Pull models with: ollama pull <model>".into());
                 state.step = WizardStep::ModelSelect;
             } else {
                 state.models = models;
@@ -416,7 +415,7 @@ fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
     let area = Rect::new(x, y, content_width, content_height);
 
     let step_label = format!("Step {}/4", state.step_number());
-    let title = format!(" LiteCode Setup — {} ", step_label);
+    let title = format!(" LitePilot Setup — {} ", step_label);
 
     let container = Block::default()
         .title(Span::styled(
@@ -448,7 +447,7 @@ fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
 fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            "LiteCode Setup",
+            "LitePilot Setup",
             Style::default()
                 .fg(theme.primary)
                 .add_modifier(Modifier::BOLD),
@@ -480,16 +479,13 @@ fn draw_url_input(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, ar
     let input_y = area.y + text_line_count;
     let input_area = Rect::new(area.x, input_y, area.width, 3);
     let input_display = format!(" {}_", &state.input_text);
-    let input = Paragraph::new(input_display).style(
-        Style::default()
-            .add_modifier(Modifier::BOLD),
-    );
+    let input = Paragraph::new(input_display).style(Style::default().add_modifier(Modifier::BOLD));
     f.render_widget(input, input_area);
 
     // Help bar
     let help_y = area.y + area.height - 1;
-    let help = Paragraph::new("Enter: connect  |  Ctrl+C: exit")
-        .style(Style::default().fg(theme.accent));
+    let help =
+        Paragraph::new("Enter: connect  |  Ctrl+C: exit").style(Style::default().fg(theme.accent));
     f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 
@@ -560,13 +556,13 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
         f.render_widget(input, Rect::new(area.x, input_y, area.width, 1));
     } else {
         // Model list
-        let visible_end = std::cmp::min(
-            state.scroll_offset + max_visible,
-            state.models.len(),
-        );
+        let visible_end = std::cmp::min(state.scroll_offset + max_visible, state.models.len());
         let mut list_lines: Vec<Line> = Vec::new();
 
-        for (i, model) in state.models[state.scroll_offset..visible_end].iter().enumerate() {
+        for (i, model) in state.models[state.scroll_offset..visible_end]
+            .iter()
+            .enumerate()
+        {
             let actual_idx = i + state.scroll_offset;
             let is_selected = actual_idx == state.selected_index;
 
@@ -598,7 +594,10 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
         }
 
         let list_para = Paragraph::new(list_lines).style(Style::default());
-        f.render_widget(list_para, Rect::new(area.x, list_y, area.width, list_height));
+        f.render_widget(
+            list_para,
+            Rect::new(area.x, list_y, area.width, list_height),
+        );
     }
 
     // Already selected
@@ -609,7 +608,11 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
     ))];
     for slot in &[ModelSlot::Fast, ModelSlot::Core, ModelSlot::Audit] {
         if let Some(ref name) = *state.selected_model_for_slot(*slot) {
-            let marker = if *slot == state.current_slot { ">" } else { " " };
+            let marker = if *slot == state.current_slot {
+                ">"
+            } else {
+                " "
+            };
             selected_lines.push(Line::from(format!(
                 "  {} {}: {}",
                 marker,
@@ -617,10 +620,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
                 name
             )));
         } else if *slot == state.current_slot {
-            selected_lines.push(Line::from(format!(
-                "  > {}: (selecting...)",
-                slot.label()
-            )));
+            selected_lines.push(Line::from(format!("  > {}: (selecting...)", slot.label())));
         }
     }
     let sel_para = Paragraph::new(selected_lines).style(Style::default());
@@ -643,7 +643,10 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
         )),
         Line::from(""),
         Line::from(vec![
-            Span::styled("  Ollama URL: ", Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "  Ollama URL: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::styled(&state.url, Style::default().fg(theme.primary)),
         ]),
         Line::from(""),

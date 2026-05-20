@@ -23,7 +23,12 @@ impl<'a> Executor<'a> {
         Self { sandbox }
     }
 
-    pub async fn run(&self, cmd: &str, args: &[String], cwd: Option<PathBuf>) -> Result<CommandOutput, SandboxError> {
+    pub async fn run(
+        &self,
+        cmd: &str,
+        args: &[String],
+        cwd: Option<PathBuf>,
+    ) -> Result<CommandOutput, SandboxError> {
         self.sandbox.validate_command(cmd, args)?;
 
         let working_dir = cwd.unwrap_or_else(|| self.sandbox.workspace().to_path_buf());
@@ -33,7 +38,9 @@ impl<'a> Executor<'a> {
             .current_dir(&working_dir)
             .output()
             .await
-            .map_err(|e| SandboxError::PathResolution(format!("Failed to execute {}: {}", cmd, e)))?;
+            .map_err(|e| {
+                SandboxError::PathResolution(format!("Failed to execute {}: {}", cmd, e))
+            })?;
 
         Ok(CommandOutput {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -66,7 +73,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let sandbox = Sandbox::new(dir.path().to_path_buf());
         let executor = Executor::new(&sandbox);
-        let result = executor.run("sudo", &["rm".into(), "-rf".into(), "/".into()], None).await;
+        let result = executor
+            .run("sudo", &["rm".into(), "-rf".into(), "/".into()], None)
+            .await;
         assert!(result.is_err());
     }
 

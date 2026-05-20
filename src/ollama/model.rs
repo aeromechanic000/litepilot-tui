@@ -37,7 +37,10 @@ pub fn estimate_parameters(name: &str) -> u64 {
     let lower = name.to_lowercase();
     // Try patterns like ":4b", ":14b", ":32b", ":0.5b"
     if let Some(rest) = lower.split(':').nth(1) {
-        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        let digits: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
         if let Ok(val) = digits.parse::<f64>() {
             return val as u64;
         }

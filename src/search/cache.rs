@@ -2,17 +2,18 @@ use super::SearchResult;
 use std::fs;
 use std::path::PathBuf;
 
-#[allow(dead_code)]
 pub struct SearchCache {
     cache_dir: PathBuf,
     valid_days: u64,
 }
 
-#[allow(dead_code)]
 impl SearchCache {
     pub fn new(cache_dir: PathBuf, valid_days: u64) -> Self {
         let _ = fs::create_dir_all(&cache_dir);
-        Self { cache_dir, valid_days }
+        Self {
+            cache_dir,
+            valid_days,
+        }
     }
 
     pub fn get(&self, query: &str) -> Option<Vec<SearchResult>> {

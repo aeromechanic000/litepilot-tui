@@ -19,7 +19,6 @@ struct ChatRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct ChatChunk {
     pub content: String,
     pub done: bool,
@@ -35,25 +34,30 @@ pub struct ChatResponse {
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: content.into() }
+        Self {
+            role: "system".into(),
+            content: content.into(),
+        }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: content.into() }
+        Self {
+            role: "user".into(),
+            content: content.into(),
+        }
     }
 
     #[allow(dead_code)]
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: content.into() }
+        Self {
+            role: "assistant".into(),
+            content: content.into(),
+        }
     }
 }
 
 impl OllamaClient {
-    pub async fn chat(
-        &self,
-        model: &str,
-        messages: Vec<ChatMessage>,
-    ) -> Result<ChatResponse> {
+    pub async fn chat(&self, model: &str, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
         let url = format!("{}/api/chat", self.endpoint);
         let body = ChatRequest {
             model: model.to_string(),
@@ -61,10 +65,13 @@ impl OllamaClient {
             stream: false,
         };
 
-        let resp = self.http.post(&url)
+        let resp = self
+            .http
+            .post(&url)
             .timeout(std::time::Duration::from_secs(300))
             .json(&body)
-            .send().await
+            .send()
+            .await
             .with_context(|| format!("Sending chat request to Ollama at {}", url))?;
 
         if resp.status() == StatusCode::NOT_FOUND {
@@ -77,17 +84,22 @@ impl OllamaClient {
         }
 
         let raw: serde_json::Value = resp.json().await?;
-        let content = raw.get("message")
+        let content = raw
+            .get("message")
             .and_then(|m| m.get("content"))
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string();
-        let resp_model = raw.get("model")
+        let resp_model = raw
+            .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or(model)
             .to_string();
 
-        Ok(ChatResponse { content, model: resp_model })
+        Ok(ChatResponse {
+            content,
+            model: resp_model,
+        })
     }
 
     #[allow(dead_code)]
@@ -124,7 +136,7 @@ impl OllamaClient {
             let mut buffer = String::new();
 
             while let Some(chunk_result) = stream.next().await {
-                let cancelled = cancel.borrow().clone();
+                let cancelled = *cancel.borrow();
                 if cancelled {
                     yield Ok(ChatChunk {
                         content: String::new(),
@@ -221,7 +233,9 @@ mod tests {
             ..crate::config::Config::default()
         };
         let client = OllamaClient::new(&config).unwrap();
-        let result = client.chat("nonexistent", vec![ChatMessage::user("hi")]).await;
+        let result = client
+            .chat("nonexistent", vec![ChatMessage::user("hi")])
+            .await;
         assert!(result.is_err());
     }
 }

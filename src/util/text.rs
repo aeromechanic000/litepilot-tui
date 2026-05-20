@@ -1,7 +1,7 @@
 #[allow(dead_code)]
 pub fn estimate_tokens(text: &str) -> usize {
     // Rough estimate: ~4 chars per token for English/code
-    (text.chars().count() + 3) / 4
+    text.chars().count().div_ceil(4)
 }
 
 #[allow(dead_code)]

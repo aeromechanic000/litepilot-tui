@@ -107,13 +107,19 @@ pub fn load_within_budget(
         if let Some(t) = templates.get(idx) {
             let t_tokens = estimate_tokens(&t.content);
             if used + t_tokens <= max_tokens {
-                refs.push(format!("### TEMPLATE: {} ###\n{}\n### END ###", t.name, t.content));
+                refs.push(format!(
+                    "### TEMPLATE: {} ###\n{}\n### END ###",
+                    t.name, t.content
+                ));
                 used += t_tokens;
             } else {
                 let remaining = max_tokens.saturating_sub(used);
                 if remaining > 100 {
                     let truncated = truncate_to_tokens(&t.content, remaining);
-                    refs.push(format!("### TEMPLATE: {} (truncated) ###\n{}\n### END ###", t.name, truncated));
+                    refs.push(format!(
+                        "### TEMPLATE: {} (truncated) ###\n{}\n### END ###",
+                        t.name, truncated
+                    ));
                     used += remaining;
                 }
                 break;
@@ -188,7 +194,10 @@ pub async fn retrieve(
     {
         Ok(indices) => indices,
         Err(e) => {
-            eprintln!("Template selection failed: {}, proceeding without templates", e);
+            eprintln!(
+                "Template selection failed: {}, proceeding without templates",
+                e
+            );
             return LoadedTemplates {
                 refs: Vec::new(),
                 total_tokens: 0,
@@ -221,7 +230,13 @@ pub async fn retrieve(
 mod tests {
     use super::*;
 
-    fn make_template(name: &str, path: &str, desc: &str, tags: Vec<&str>, content: impl Into<String>) -> Template {
+    fn make_template(
+        name: &str,
+        path: &str,
+        desc: &str,
+        tags: Vec<&str>,
+        content: impl Into<String>,
+    ) -> Template {
         let content = content.into();
         Template {
             name: name.to_string(),
@@ -236,8 +251,20 @@ mod tests {
     #[test]
     fn catalog_format() {
         let templates = vec![
-            make_template("flask_api", "python/flask_api.py", "Flask REST API", vec!["python", "flask"], "code"),
-            make_template("cli_app", "rust/cli_app.rs", "CLI with clap", vec!["rust", "cli"], "code"),
+            make_template(
+                "flask_api",
+                "python/flask_api.py",
+                "Flask REST API",
+                vec!["python", "flask"],
+                "code",
+            ),
+            make_template(
+                "cli_app",
+                "rust/cli_app.rs",
+                "CLI with clap",
+                vec!["rust", "cli"],
+                "code",
+            ),
         ];
         let catalog = build_catalog(&templates);
         assert!(catalog.contains("1|flask_api|python|python,flask|Flask REST API"));
@@ -318,7 +345,10 @@ mod tests {
 
     #[test]
     fn truncate_context_long() {
-        let ctx = (1..=20).map(|i| format!("line{}", i)).collect::<Vec<_>>().join("\n");
+        let ctx = (1..=20)
+            .map(|i| format!("line{}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_project_context(&ctx, 10);
         assert!(result.ends_with("..."));
         assert!(result.lines().count() == 11); // 10 lines + "..."

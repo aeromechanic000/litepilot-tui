@@ -1,5 +1,5 @@
-pub mod parser;
 pub mod builtin;
+pub mod parser;
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -27,7 +27,7 @@ impl SkillRegistry {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.extension().map_or(false, |e| e == "md") {
+                if path.extension().is_some_and(|e| e == "md") {
                     if let Ok(content) = std::fs::read_to_string(&path) {
                         if let Some(skill) = parser::parse_skill(&content) {
                             skills.push(skill);

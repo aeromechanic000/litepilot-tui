@@ -93,8 +93,14 @@ mod tests {
 
     #[test]
     fn prompt_selection_by_size() {
-        assert_eq!(system_prompt_for_size(&ModelSize::Small), SMALL_MODEL_SYSTEM);
+        assert_eq!(
+            system_prompt_for_size(&ModelSize::Small),
+            SMALL_MODEL_SYSTEM
+        );
         assert_eq!(system_prompt_for_size(&ModelSize::Medium), CODING_SYSTEM);
-        assert_eq!(system_prompt_for_size(&ModelSize::Large), LARGE_MODEL_SYSTEM);
+        assert_eq!(
+            system_prompt_for_size(&ModelSize::Large),
+            LARGE_MODEL_SYSTEM
+        );
     }
 }

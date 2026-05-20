@@ -55,7 +55,10 @@ mod tests {
         let old = "line1\nline2\n";
         let new = "line1\nline2\nline3\n";
         let diff = generate_diff(old, new);
-        let added: Vec<_> = diff.iter().filter(|d| matches!(d, DiffLine::Added(_))).collect();
+        let added: Vec<_> = diff
+            .iter()
+            .filter(|d| matches!(d, DiffLine::Added(_)))
+            .collect();
         assert_eq!(added.len(), 1);
         assert_eq!(added[0], &DiffLine::Added("line3\n".into()));
     }
@@ -65,7 +68,10 @@ mod tests {
         let old = "a\nb\nc\n";
         let new = "a\nc\n";
         let diff = generate_diff(old, new);
-        let removed: Vec<_> = diff.iter().filter(|d| matches!(d, DiffLine::Removed(_))).collect();
+        let removed: Vec<_> = diff
+            .iter()
+            .filter(|d| matches!(d, DiffLine::Removed(_)))
+            .collect();
         assert_eq!(removed.len(), 1);
     }
 

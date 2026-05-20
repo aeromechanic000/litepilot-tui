@@ -1,5 +1,5 @@
-use ratatui::style::Color;
 use crate::config::ThemeColors;
+use ratatui::style::Color;
 
 pub struct Theme {
     pub primary: Color,

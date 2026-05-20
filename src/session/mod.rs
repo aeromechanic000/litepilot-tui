@@ -54,10 +54,13 @@ impl Session {
     }
 
     pub fn user_messages(&self) -> Vec<ChatMessage> {
-        self.messages.iter().map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        }).collect()
+        self.messages
+            .iter()
+            .map(|m| ChatMessage {
+                role: m.role.clone(),
+                content: m.content.clone(),
+            })
+            .collect()
     }
 
     pub fn preview(&self) -> String {

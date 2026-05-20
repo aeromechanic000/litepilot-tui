@@ -5,28 +5,35 @@ use std::path::{Path, PathBuf};
 
 #[allow(dead_code)]
 const BLOCKED_COMMANDS: &[&str] = &[
-    "sudo", "su", "mkfs", "dd", "format", "chmod", "chown",
-    "systemctl", "service", "launchctl",
-    "shutdown", "reboot", "poweroff", "halt",
-    "rm", "rmdir", "del",
-    "curl|bash", "wget|bash",
-    "tee", "crontab",
+    "sudo",
+    "su",
+    "mkfs",
+    "dd",
+    "format",
+    "chmod",
+    "chown",
+    "systemctl",
+    "service",
+    "launchctl",
+    "shutdown",
+    "reboot",
+    "poweroff",
+    "halt",
+    "rm",
+    "rmdir",
+    "del",
+    "curl|bash",
+    "wget|bash",
+    "tee",
+    "crontab",
 ];
 
 #[allow(dead_code)]
 const ALLOWED_COMMANDS: &[&str] = &[
-    "cargo", "rustc", "rustup",
-    "python", "python3", "uv", "pip", "pip3",
-    "node", "npm", "npx", "bun", "deno",
-    "go", "gcc", "g++", "make", "cmake",
-    "git",
-    "curl", "wget",
-    "ls", "cat", "head", "tail", "find", "grep", "rg", "fd",
-    "echo", "pwd", "which", "env",
-    "dotnet", "java", "javac",
-    "bash", "sh", "zsh",
-    "docker", "podman",
-    "pytest", "jest", "vitest",
+    "cargo", "rustc", "rustup", "python", "python3", "uv", "pip", "pip3", "node", "npm", "npx",
+    "bun", "deno", "go", "gcc", "g++", "make", "cmake", "git", "curl", "wget", "ls", "cat", "head",
+    "tail", "find", "grep", "rg", "fd", "echo", "pwd", "which", "env", "dotnet", "java", "javac",
+    "bash", "sh", "zsh", "docker", "podman", "pytest", "jest", "vitest",
 ];
 
 #[allow(dead_code)]
@@ -41,7 +48,11 @@ impl Sandbox {
     pub fn new(workspace: PathBuf) -> Self {
         let allowed: HashSet<String> = ALLOWED_COMMANDS.iter().map(|s| s.to_string()).collect();
         let blocked: HashSet<String> = BLOCKED_COMMANDS.iter().map(|s| s.to_string()).collect();
-        Self { workspace, allowed, blocked }
+        Self {
+            workspace,
+            allowed,
+            blocked,
+        }
     }
 
     pub fn workspace(&self) -> &Path {
@@ -50,16 +61,23 @@ impl Sandbox {
 
     pub fn validate_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
         let canonical_target = if path.exists() {
-            path.canonicalize().map_err(|e| SandboxError::PathResolution(e.to_string()))?
+            path.canonicalize()
+                .map_err(|e| SandboxError::PathResolution(e.to_string()))?
         } else {
             // For new files, canonicalize parent and append filename
             let parent = path.parent().unwrap_or(Path::new("."));
-            let canonical_parent = parent.canonicalize()
+            let canonical_parent = parent
+                .canonicalize()
                 .map_err(|e| SandboxError::PathResolution(e.to_string()))?;
-            canonical_parent.join(path.file_name().ok_or_else(|| SandboxError::PathResolution("No filename".into()))?)
+            canonical_parent.join(
+                path.file_name()
+                    .ok_or_else(|| SandboxError::PathResolution("No filename".into()))?,
+            )
         };
 
-        let canonical_workspace = self.workspace.canonicalize()
+        let canonical_workspace = self
+            .workspace
+            .canonicalize()
             .unwrap_or_else(|_| self.workspace.clone());
 
         if !canonical_target.starts_with(&canonical_workspace) {
@@ -87,7 +105,10 @@ impl Sandbox {
         // rm is only allowed within workspace context (we check paths separately)
         // but -rf / or similar patterns are always blocked
         let args_str = args.join(" ");
-        if args_str.contains("-rf /") || args_str.contains("-r /") || args_str.contains("/ --recursive") {
+        if args_str.contains("-rf /")
+            || args_str.contains("-r /")
+            || args_str.contains("/ --recursive")
+        {
             return Err(SandboxError::DangerousArguments(args_str));
         }
 
@@ -139,7 +160,10 @@ mod tests {
     fn path_outside_workspace_rejected() {
         let (_dir, sandbox) = setup();
         let result = sandbox.validate_path(Path::new("/etc/passwd"));
-        assert!(matches!(result, Err(SandboxError::PathOutsideWorkspace { .. })));
+        assert!(matches!(
+            result,
+            Err(SandboxError::PathOutsideWorkspace { .. })
+        ));
     }
 
     #[test]
@@ -154,7 +178,11 @@ mod tests {
     fn allowed_commands_pass() {
         let (_dir, sandbox) = setup();
         for cmd in &["cargo", "python", "node", "uv", "git", "npm", "go", "gcc"] {
-            assert!(sandbox.validate_command(cmd, &[]).is_ok(), "Command {} should be allowed", cmd);
+            assert!(
+                sandbox.validate_command(cmd, &[]).is_ok(),
+                "Command {} should be allowed",
+                cmd
+            );
         }
     }
 
@@ -162,14 +190,20 @@ mod tests {
     fn blocked_commands_rejected() {
         let (_dir, sandbox) = setup();
         for cmd in &["sudo", "mkfs", "chmod", "chown", "shutdown"] {
-            assert!(sandbox.validate_command(cmd, &[]).is_err(), "Command {} should be blocked", cmd);
+            assert!(
+                sandbox.validate_command(cmd, &[]).is_err(),
+                "Command {} should be blocked",
+                cmd
+            );
         }
     }
 
     #[test]
     fn dangerous_rm_args_rejected() {
         let (_dir, sandbox) = setup();
-        assert!(sandbox.validate_command("rm", &["-rf".into(), "/".into()]).is_err());
+        assert!(sandbox
+            .validate_command("rm", &["-rf".into(), "/".into()])
+            .is_err());
     }
 
     #[test]

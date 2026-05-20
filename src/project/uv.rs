@@ -3,35 +3,49 @@ use crate::sandbox::Sandbox;
 use anyhow::{Context, Result};
 use std::path::Path;
 
-#[allow(dead_code)]
 pub struct UvManager;
 
-#[allow(dead_code)]
 impl UvManager {
     pub async fn init(project_dir: &Path, sandbox: &Sandbox) -> Result<CommandOutput> {
         let executor = Executor::new(sandbox);
-        executor.run("uv", &["init".into()], Some(project_dir.to_path_buf()))
+        executor
+            .run("uv", &["init".into()], Some(project_dir.to_path_buf()))
             .await
             .context("Running uv init")
     }
 
     pub async fn create_venv(project_dir: &Path, sandbox: &Sandbox) -> Result<CommandOutput> {
         let executor = Executor::new(sandbox);
-        executor.run("uv", &["venv".into()], Some(project_dir.to_path_buf()))
+        executor
+            .run("uv", &["venv".into()], Some(project_dir.to_path_buf()))
             .await
             .context("Running uv venv")
     }
 
-    pub async fn add(project_dir: &Path, package: &str, sandbox: &Sandbox) -> Result<CommandOutput> {
+    pub async fn add(
+        project_dir: &Path,
+        package: &str,
+        sandbox: &Sandbox,
+    ) -> Result<CommandOutput> {
         let executor = Executor::new(sandbox);
-        executor.run("uv", &["add".into(), package.into()], Some(project_dir.to_path_buf()))
+        executor
+            .run(
+                "uv",
+                &["add".into(), package.into()],
+                Some(project_dir.to_path_buf()),
+            )
             .await
             .context("Running uv add")
     }
 
     pub async fn run(project_dir: &Path, script: &str, sandbox: &Sandbox) -> Result<CommandOutput> {
         let executor = Executor::new(sandbox);
-        executor.run("uv", &["run".into(), script.into()], Some(project_dir.to_path_buf()))
+        executor
+            .run(
+                "uv",
+                &["run".into(), script.into()],
+                Some(project_dir.to_path_buf()),
+            )
             .await
             .context("Running uv run")
     }

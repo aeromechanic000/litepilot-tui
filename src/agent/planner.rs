@@ -14,7 +14,10 @@ pub async fn run_planning(
     let code_base_section = if code_base_refs.is_empty() {
         String::new()
     } else {
-        format!("\n\nReference code from built-in library:\n{}", code_base_refs.join("\n"))
+        format!(
+            "\n\nReference code from built-in library:\n{}",
+            code_base_refs.join("\n")
+        )
     };
 
     let messages = vec![
@@ -31,11 +34,8 @@ pub async fn run_planning(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn planner_builds_messages_correctly() {
-        // Verify the planner would construct proper messages
         let code_refs = vec!["template1".to_string(), "template2".to_string()];
         let code_section = if code_refs.is_empty() {
             String::new()

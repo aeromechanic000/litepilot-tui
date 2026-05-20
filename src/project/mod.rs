@@ -23,7 +23,10 @@ pub struct ProjectContext {
 impl ProjectContext {
     pub fn new(root: PathBuf) -> Self {
         let gitignore = Self::load_gitignore(&root);
-        Self { root, gitignore_patterns: gitignore }
+        Self {
+            root,
+            gitignore_patterns: gitignore,
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -33,14 +36,19 @@ impl ProjectContext {
     fn load_gitignore(root: &Path) -> Vec<String> {
         let gi_path = root.join(".gitignore");
         if let Ok(content) = std::fs::read_to_string(&gi_path) {
-            content.lines()
+            content
+                .lines()
                 .filter(|l| !l.is_empty() && !l.starts_with('#'))
                 .map(|l| l.to_string())
                 .collect()
         } else {
             vec![
-                "target".into(), "node_modules".into(), ".git".into(),
-                "__pycache__".into(), ".venv".into(), "venv".into(),
+                "target".into(),
+                "node_modules".into(),
+                ".git".into(),
+                "__pycache__".into(),
+                ".venv".into(),
+                "venv".into(),
             ]
         }
     }
@@ -71,7 +79,12 @@ impl ProjectContext {
             let name = entry.file_name().to_string_lossy().to_string();
             let is_dir = entry.file_type().is_dir();
             let depth = entry.depth();
-            entries.push(FileEntry { path, is_dir, depth, name });
+            entries.push(FileEntry {
+                path,
+                is_dir,
+                depth,
+                name,
+            });
         }
         entries
     }

@@ -1,0 +1,33 @@
+{
+  "name": "litepilot-tui",
+  "version": "0.1.0",
+  "description": "Terminal AI coding assistant powered by local Ollama models",
+  "bin": {
+    "litepilot": "./bin/litepilot.js"
+  },
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "os": ["darwin", "linux"],
+  "cpu": ["x64", "arm64"],
+  "keywords": [
+    "tui",
+    "ai",
+    "coding",
+    "assistant",
+    "ollama",
+    "local",
+    "terminal",
+    "llm"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/aeromechanic000/litepilot-tui"
+  },
+  "homepage": "https://github.com/aeromechanic000/litepilot-tui",
+  "bugs": {
+    "url": "https://github.com/aeromechanic000/litepilot-tui/issues"
+  }
+}

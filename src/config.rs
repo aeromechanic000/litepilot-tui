@@ -59,7 +59,7 @@ impl Default for Config {
             fast_model: String::new(),
             core_model: String::new(),
             audit_model: String::new(),
-            code_base_path: "~/.litecode/code_base".to_string(),
+            code_base_path: "~/.litepilot/code_base".to_string(),
             default_mode: "edit".to_string(),
             auto_mode_only_workspace: true,
             enable_auto_syntax_check: true,
@@ -80,17 +80,17 @@ impl Default for Config {
 impl Config {
     pub fn config_dir() -> Result<PathBuf> {
         let home = dirs::home_dir().context("Cannot determine home directory")?;
-        Ok(home.join(".litecode"))
+        Ok(home.join(".litepilot"))
     }
 
-    /// Check for project-local `.litecode` directory in the given workspace,
-    /// fall back to global `~/.litecode` if not found.
+    /// Check for project-local `.litepilot` directory in the given workspace,
+    /// fall back to global `~/.litepilot` if not found.
     pub fn effective_dir(workspace: &Path) -> PathBuf {
-        let local = workspace.join(".litecode");
+        let local = workspace.join(".litepilot");
         if local.is_dir() {
             local
         } else {
-            Self::config_dir().unwrap_or_else(|_| local)
+            Self::config_dir().unwrap_or(local)
         }
     }
 
@@ -110,7 +110,7 @@ impl Config {
     }
 
     /// Initialize directory structure and populate code_base templates.
-    /// Used for both global (~/.litecode) and project-local (.litecode) dirs.
+    /// Used for both global (~/.litepilot) and project-local (.litepilot) dirs.
     pub fn ensure_dirs_for(workspace: &Path) -> Result<PathBuf> {
         let dir = Self::effective_dir(workspace);
         Self::create_dir_structure(&dir)?;
@@ -119,7 +119,7 @@ impl Config {
         let code_base = dir.join("code_base");
         crate::codebase::builtin::populate_codebase(&code_base)?;
 
-        // Always populate skills in global ~/.litecode/skills/
+        // Always populate skills in global ~/.litepilot/skills/
         let global_dir = Self::config_dir()?;
         let _ = crate::skills::builtin::populate_skills(&global_dir.join("skills"));
 
@@ -143,7 +143,7 @@ impl Config {
         Self::load_from(&path)
     }
 
-    /// Load config from project-local `.litecode` if present, else global.
+    /// Load config from project-local `.litepilot` if present, else global.
     pub fn load_for_workspace(workspace: &Path) -> Result<Self> {
         let path = Self::config_path_for(workspace);
         if path.exists() {
@@ -156,15 +156,13 @@ impl Config {
     pub fn load_from(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Reading config from {}", path.display()))?;
-        let config: Config = toml::from_str(&content)
-            .with_context(|| "Parsing config.toml")?;
+        let config: Config = toml::from_str(&content).with_context(|| "Parsing config.toml")?;
         config.validate()?;
         Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let content = toml::to_string_pretty(self)
-            .context("Serializing config to TOML")?;
+        let content = toml::to_string_pretty(self).context("Serializing config to TOML")?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -179,7 +177,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !self.ollama_endpoint.starts_with("http://") && !self.ollama_endpoint.starts_with("https://") {
+        if !self.ollama_endpoint.starts_with("http://")
+            && !self.ollama_endpoint.starts_with("https://")
+        {
             anyhow::bail!("ollama_endpoint must start with http:// or https://");
         }
         let valid_modes = ["plan", "edit", "auto"];
@@ -331,7 +331,7 @@ mod tests {
     #[test]
     fn ensure_dirs_creates_structure() {
         let dir = TempDir::new().unwrap();
-        let base = dir.path().join(".litecode");
+        let base = dir.path().join(".litepilot");
         // Monkey-patch: just verify the subdirectories would be created
         for sub in &["sessions", "cache", "code_base", "skills"] {
             std::fs::create_dir_all(base.join(sub)).unwrap();

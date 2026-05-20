@@ -53,14 +53,15 @@ impl CodeBase {
         self.templates
             .iter()
             .filter(|t| {
-                let matches_query = !query_lower.is_empty() && (
-                    t.description.to_lowercase().contains(&query_lower)
-                    || t.name.to_lowercase().contains(&query_lower)
-                    || t.scene.to_lowercase().contains(&query_lower)
-                );
+                let matches_query = !query_lower.is_empty()
+                    && (t.description.to_lowercase().contains(&query_lower)
+                        || t.name.to_lowercase().contains(&query_lower)
+                        || t.scene.to_lowercase().contains(&query_lower));
                 let matches_tags = !tags.is_empty()
                     && tags.iter().any(|tag| {
-                        t.tags.iter().any(|t_tag| t_tag.to_lowercase().contains(&tag.to_lowercase()))
+                        t.tags
+                            .iter()
+                            .any(|t_tag| t_tag.to_lowercase().contains(&tag.to_lowercase()))
                     });
                 matches_query || matches_tags
             })
@@ -94,8 +95,16 @@ mod tests {
     fn search_by_description() {
         let cb = CodeBase {
             templates: vec![
-                make_test_template("flask_app", "Flask web application template", vec!["python", "flask"]),
-                make_test_template("snake_game", "Classic snake game", vec!["javascript", "game"]),
+                make_test_template(
+                    "flask_app",
+                    "Flask web application template",
+                    vec!["python", "flask"],
+                ),
+                make_test_template(
+                    "snake_game",
+                    "Classic snake game",
+                    vec!["javascript", "game"],
+                ),
             ],
             base_dir: PathBuf::from("/tmp"),
         };

@@ -20,7 +20,10 @@ pub fn scan_directory(dir: &Path) -> Result<Vec<Template>, std::io::Error> {
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !matches!(ext, "py" | "js" | "ts" | "rs" | "go" | "html" | "css" | "sh" | "toml" | "json") {
+        if !matches!(
+            ext,
+            "py" | "js" | "ts" | "rs" | "go" | "html" | "css" | "sh" | "toml" | "json"
+        ) {
             continue;
         }
 
@@ -59,13 +62,14 @@ fn parse_template(content: String, path: &Path, base_dir: &Path) -> Option<Templ
         .unwrap_or_default();
 
     let tags: Vec<String> = tags_str
-        .split(|c: char| c == ',' || c == ' ')
+        .split([',', ' '])
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect();
 
     let name = path.file_stem()?.to_str()?.to_string();
-    let rel_path = path.strip_prefix(base_dir)
+    let rel_path = path
+        .strip_prefix(base_dir)
         .unwrap_or(path)
         .to_string_lossy()
         .to_string();
@@ -97,8 +101,11 @@ mod tests {
     fn scan_finds_tagged_files() {
         let dir = TempDir::new().unwrap();
         write_template(
-            dir.path(), "app.py",
-            "Flask app", "web development", "python, flask, web",
+            dir.path(),
+            "app.py",
+            "Flask app",
+            "web development",
+            "python, flask, web",
             "from flask import Flask\napp = Flask(__name__)\n",
         );
         let templates = scan_directory(dir.path()).unwrap();

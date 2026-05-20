@@ -4,14 +4,12 @@ use crate::util::diff::generate_unified_diff;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-#[allow(dead_code)]
 pub struct FileOps<'a> {
     sandbox: &'a Sandbox,
     mode: AppMode,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct FileChange {
     pub path: PathBuf,
     pub action: FileAction,
@@ -19,23 +17,27 @@ pub struct FileChange {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum FileAction {
-    Create { content: String },
-    Modify { old_content: String, new_content: String },
+    Create {
+        content: String,
+    },
+    Modify {
+        #[allow(dead_code)]
+        old_content: String,
+        new_content: String,
+    },
     Delete,
 }
 
-#[allow(dead_code)]
 impl<'a> FileOps<'a> {
     pub fn new(sandbox: &'a Sandbox, mode: AppMode) -> Self {
         Self { sandbox, mode }
     }
 
+    #[allow(dead_code)]
     pub fn read_file(&self, path: &Path) -> Result<String> {
         let _validated = self.sandbox.validate_path(path)?;
-        std::fs::read_to_string(path)
-            .with_context(|| format!("Reading {}", path.display()))
+        std::fs::read_to_string(path).with_context(|| format!("Reading {}", path.display()))
     }
 
     pub fn prepare_write(&self, path: &Path, content: &str) -> Result<FileChange> {
@@ -52,7 +54,9 @@ impl<'a> FileOps<'a> {
         };
 
         let action = if old_content.is_empty() {
-            FileAction::Create { content: content.to_string() }
+            FileAction::Create {
+                content: content.to_string(),
+            }
         } else {
             FileAction::Modify {
                 old_content: old_content.clone(),
@@ -76,7 +80,11 @@ impl<'a> FileOps<'a> {
         }
 
         match &change.action {
-            FileAction::Create { content } | FileAction::Modify { new_content: content, .. } => {
+            FileAction::Create { content }
+            | FileAction::Modify {
+                new_content: content,
+                ..
+            } => {
                 if let Some(parent) = change.path.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -134,7 +142,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let sandbox = Sandbox::new(dir.path().to_path_buf());
         let ops = FileOps::new(&sandbox, AppMode::Auto);
-        let change = ops.prepare_write(&dir.path().join("test.rs"), "fn main(){}").unwrap();
+        let change = ops
+            .prepare_write(&dir.path().join("test.rs"), "fn main(){}")
+            .unwrap();
         ops.apply_change(&change).unwrap();
         assert!(dir.path().join("test.rs").exists());
         let content = std::fs::read_to_string(dir.path().join("test.rs")).unwrap();

@@ -1,15 +1,15 @@
-pub mod planner;
-pub mod editor;
 pub mod auto_run;
-pub mod syntax;
+pub mod editor;
+pub mod planner;
 pub mod prompts;
 pub mod retry;
+pub mod syntax;
 
+use crate::codebase::CodeBase;
+use crate::config::Config;
 use crate::ollama::chat::ChatMessage;
 use crate::ollama::OllamaClient;
-use crate::config::Config;
 use crate::sandbox::Sandbox;
-use crate::codebase::CodeBase;
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -54,7 +54,12 @@ impl<'a> AgentPipeline<'a> {
         sandbox: &'a Sandbox,
         workspace: PathBuf,
     ) -> Self {
-        Self { client, config, sandbox, workspace }
+        Self {
+            client,
+            config,
+            sandbox,
+            workspace,
+        }
     }
 
     pub async fn plan(&self, user_request: &str, context: &str) -> Result<Plan> {
@@ -77,14 +82,21 @@ impl<'a> AgentPipeline<'a> {
         codebase: &CodeBase,
     ) -> Result<Plan> {
         let loaded = crate::codebase::retrieval::retrieve(
-            self.client, self.config, codebase, user_request, context,
+            self.client,
+            self.config,
+            codebase,
+            user_request,
+            context,
         )
         .await;
 
         let code_base_section = if loaded.refs.is_empty() {
             String::new()
         } else {
-            format!("\n\nReference code from built-in library:\n{}", loaded.refs.join("\n"))
+            format!(
+                "\n\nReference code from built-in library:\n{}",
+                loaded.refs.join("\n")
+            )
         };
 
         let messages = vec![
@@ -99,11 +111,19 @@ impl<'a> AgentPipeline<'a> {
         Ok(Self::parse_plan(&response.content))
     }
 
-    pub async fn implement(&self, plan: &Plan, context: &str, template_refs: &[String]) -> Result<Vec<FileChange>> {
+    pub async fn implement(
+        &self,
+        plan: &Plan,
+        context: &str,
+        template_refs: &[String],
+    ) -> Result<Vec<FileChange>> {
         let code_base_section = if template_refs.is_empty() {
             String::new()
         } else {
-            format!("\n\nReference code from built-in library:\n{}", template_refs.join("\n"))
+            format!(
+                "\n\nReference code from built-in library:\n{}",
+                template_refs.join("\n")
+            )
         };
 
         let messages = vec![
@@ -120,7 +140,8 @@ impl<'a> AgentPipeline<'a> {
     }
 
     pub async fn audit(&self, changes: &[FileChange], context: &str) -> Result<AuditResult> {
-        let changes_str: Vec<String> = changes.iter()
+        let changes_str: Vec<String> = changes
+            .iter()
             .map(|c| format!("--- {} ({}) ---\n{}", c.path.display(), c.action, c.content))
             .collect();
         let messages = vec![
@@ -139,8 +160,13 @@ impl<'a> AgentPipeline<'a> {
     fn parse_plan(text: &str) -> Plan {
         Plan {
             analysis: text.to_string(),
-            steps: text.lines()
-                .filter(|l| l.trim().starts_with("- ") || l.trim().starts_with("* ") || l.trim().chars().next().map_or(false, |c| c.is_ascii_digit()))
+            steps: text
+                .lines()
+                .filter(|l| {
+                    l.trim().starts_with("- ")
+                        || l.trim().starts_with("* ")
+                        || l.trim().chars().next().is_some_and(|c| c.is_ascii_digit())
+                })
                 .map(|l| l.trim().to_string())
                 .collect(),
             files: Vec::new(),
@@ -148,7 +174,7 @@ impl<'a> AgentPipeline<'a> {
         }
     }
 
-    fn parse_file_changes(text: &str) -> Vec<FileChange> {
+    pub fn parse_file_changes(text: &str) -> Vec<FileChange> {
         let mut changes = Vec::new();
         let mut current_path = String::new();
         let mut current_action = String::new();
@@ -191,14 +217,22 @@ impl<'a> AgentPipeline<'a> {
     fn parse_audit(text: &str) -> AuditResult {
         let upper = text.to_uppercase();
         let passed = upper.contains("PASS") && !upper.contains("FAIL");
-        let issues: Vec<String> = text.lines()
+        let issues: Vec<String> = text
+            .lines()
             .filter(|l| {
                 let lower = l.to_lowercase();
-                lower.contains("error") || lower.contains("bug") || lower.contains("issue") || lower.contains("problem")
+                lower.contains("error")
+                    || lower.contains("bug")
+                    || lower.contains("issue")
+                    || lower.contains("problem")
             })
             .map(|l| l.to_string())
             .collect();
-        AuditResult { passed, issues, fixes: Vec::new() }
+        AuditResult {
+            passed,
+            issues,
+            fixes: Vec::new(),
+        }
     }
 }
 
@@ -208,7 +242,8 @@ mod tests {
 
     #[test]
     fn parse_plan_extracts_steps() {
-        let text = "# Plan\n\nSteps:\n- Create main.rs\n- Add config module\n- Write tests\n1. First do X";
+        let text =
+            "# Plan\n\nSteps:\n- Create main.rs\n- Add config module\n- Write tests\n1. First do X";
         let plan = AgentPipeline::parse_plan(&text);
         assert!(!plan.steps.is_empty());
         assert!(plan.analysis.contains("Plan"));

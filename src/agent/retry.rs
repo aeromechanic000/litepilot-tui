@@ -45,7 +45,8 @@ fn validate_code_response(content: &str) -> ValidationResult {
                      ### FILE: path/to/file\n\
                      ### ACTION: create|modify|delete\n\
                      ```\ncode here\n```\n\n\
-                     Please output the complete file contents using this exact format.".into(),
+                     Please output the complete file contents using this exact format."
+                .into(),
         };
     }
 
@@ -53,17 +54,19 @@ fn validate_code_response(content: &str) -> ValidationResult {
         return ValidationResult::Invalid {
             response: content.to_string(),
             reason: "Found file markers (### FILE:) but no code blocks (```). \
-                     Each file must include its content inside ``` blocks.".into(),
+                     Each file must include its content inside ``` blocks."
+                .into(),
         };
     }
 
     // Check for unclosed code blocks
     let fence_count = content.matches("```").count();
-    if fence_count % 2 != 0 {
+    if !fence_count.is_multiple_of(2) {
         return ValidationResult::Invalid {
             response: content.to_string(),
             reason: "Unclosed code block detected (odd number of ``` fences). \
-                     Make sure every opening ``` has a matching closing ```.".into(),
+                     Make sure every opening ``` has a matching closing ```."
+                .into(),
         };
     }
 
@@ -85,10 +88,7 @@ fn validate_code_response(content: &str) -> ValidationResult {
 }
 
 /// Builds the correction prompt from previous failed attempts.
-pub fn build_correction_prompt(
-    original_request: &str,
-    attempts: &[(String, String)],
-) -> String {
+pub fn build_correction_prompt(original_request: &str, attempts: &[(String, String)]) -> String {
     let mut prompt = format!("Original request:\n{}\n\n", original_request);
 
     if attempts.is_empty() {
@@ -99,12 +99,17 @@ pub fn build_correction_prompt(
 
     for (i, (response, error)) in attempts.iter().enumerate() {
         prompt.push_str(&format!("--- Attempt {} ---\n", i + 1));
-        prompt.push_str(&format!("Response:\n{}\n\n", truncate_for_context(response, 2000)));
+        prompt.push_str(&format!(
+            "Response:\n{}\n\n",
+            truncate_for_context(response, 2000)
+        ));
         prompt.push_str(&format!("Error: {}\n\n", error));
     }
 
-    prompt.push_str("Please fix the issues above and provide a corrected response. \
-                     Follow the required output format exactly.\n");
+    prompt.push_str(
+        "Please fix the issues above and provide a corrected response. \
+                     Follow the required output format exactly.\n",
+    );
 
     prompt
 }
@@ -114,7 +119,11 @@ fn truncate_for_context(text: &str, max_chars: usize) -> String {
         text.to_string()
     } else {
         let truncated = &text[..max_chars];
-        format!("{}...\n[truncated, {} chars omitted]", truncated, text.len() - max_chars)
+        format!(
+            "{}...\n[truncated, {} chars omitted]",
+            truncated,
+            text.len() - max_chars
+        )
     }
 }
 
@@ -196,6 +205,30 @@ pub enum RetryResult {
         #[allow(dead_code)]
         attempts: usize,
     },
+}
+
+/// Unified result from the main event loop channel.
+/// Wraps either a direct chat retry result or a full auto pipeline result.
+pub enum PipelineResult {
+    /// Direct chat or skill invocation result (non-streaming fallback)
+    Retry(RetryResult),
+    /// Auto pipeline completed — files were generated and applied
+    AutoSuccess {
+        changes: Vec<crate::agent::FileChange>,
+        applied: Vec<String>,
+    },
+    /// Auto pipeline failed at some stage
+    AutoFailed { error: String },
+    /// Web search completed — results will be prepended to LLM context
+    SearchDone {
+        count: usize,
+        #[allow(dead_code)]
+        context: String,
+    },
+    /// Streaming chunk — token-by-token output from the LLM
+    StreamChunk { content: String },
+    /// Streaming finished — contains the full accumulated content
+    StreamDone { content: String },
 }
 
 #[cfg(test)]
