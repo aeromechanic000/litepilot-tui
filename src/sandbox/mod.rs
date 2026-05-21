@@ -34,6 +34,7 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "bun", "deno", "go", "gcc", "g++", "make", "cmake", "git", "curl", "wget", "ls", "cat", "head",
     "tail", "find", "grep", "rg", "fd", "echo", "pwd", "which", "env", "dotnet", "java", "javac",
     "bash", "sh", "zsh", "docker", "podman", "pytest", "jest", "vitest",
+    "mkdir", "touch", "cp", "mv", "test",
 ];
 
 #[allow(dead_code)]

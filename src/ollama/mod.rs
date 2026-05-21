@@ -11,18 +11,21 @@ pub struct OllamaClient {
     #[allow(dead_code)]
     timeout: Duration,
     http: Client,
+    num_ctx: u64,
 }
 
 impl OllamaClient {
     pub fn new(config: &Config) -> Result<Self> {
         let http = Client::builder()
-            .timeout(Duration::from_secs(config.connect_timeout))
+            .connect_timeout(Duration::from_secs(config.connect_timeout))
+            .timeout(Duration::from_secs(600))
             .build()
             .context("Creating HTTP client")?;
         Ok(Self {
             endpoint: config.ollama_endpoint.trim_end_matches('/').to_string(),
             timeout: Duration::from_secs(config.connect_timeout),
             http,
+            num_ctx: config.context_window_limit,
         })
     }
 
@@ -31,8 +34,14 @@ impl OllamaClient {
         &self.endpoint
     }
 
-    pub fn http_client(self) -> Client {
-        self.http
+    /// Build an HTTP client suitable for streaming (no overall deadline, only connect timeout).
+    pub fn streaming_http_client(connect_timeout: Duration) -> Result<Client> {
+        Client::builder()
+            .connect_timeout(connect_timeout)
+            // No .timeout() — streams can run indefinitely; per-chunk read timeout
+            // is handled by the OS TCP stack (typically ~60s between chunks).
+            .build()
+            .context("Creating streaming HTTP client")
     }
 
     pub async fn ping(&self) -> Result<()> {

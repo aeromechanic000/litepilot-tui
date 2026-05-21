@@ -28,7 +28,7 @@ pub async fn run_planning(
         )),
     ];
 
-    let response = client.chat(model, messages).await?;
+    let response = client.chat(model, messages, true).await?;
     Ok(super::AgentPipeline::parse_plan(&response.content))
 }
 

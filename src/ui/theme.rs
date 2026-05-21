@@ -10,8 +10,8 @@ pub struct Theme {
 impl Theme {
     pub fn from_config(colors: &ThemeColors) -> Self {
         Self {
-            primary: parse_color(&colors.primary).unwrap_or(Color::Rgb(135, 206, 235)),
-            accent: parse_color(&colors.accent).unwrap_or(Color::Cyan),
+            primary: parse_color(&colors.primary).unwrap_or(Color::Cyan),
+            accent: parse_color(&colors.accent).unwrap_or(Color::Magenta),
             warning: parse_color(&colors.warning).unwrap_or(Color::Yellow),
         }
     }
@@ -162,8 +162,8 @@ mod tests {
     #[test]
     fn default_theme_uses_config_colors() {
         let theme = Theme::default();
-        assert_eq!(theme.primary, Color::Rgb(135, 206, 235));
-        assert_eq!(theme.accent, Color::Cyan);
+        assert_eq!(theme.primary, Color::Cyan);
+        assert_eq!(theme.accent, Color::Magenta);
         assert_eq!(theme.warning, Color::Yellow);
     }
 
@@ -247,6 +247,6 @@ mod tests {
             ..ThemeColors::default()
         };
         let theme = Theme::from_config(&colors);
-        assert_eq!(theme.primary, Color::Rgb(135, 206, 235));
+        assert_eq!(theme.primary, Color::Cyan);
     }
 }

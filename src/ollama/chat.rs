@@ -16,6 +16,17 @@ struct ChatRequest {
     model: String,
     messages: Vec<ChatMessage>,
     stream: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    think: bool,
+    options: ChatOptions,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ChatOptions {
+    /// Context window size in tokens
+    num_ctx: u64,
+    /// -1 = unlimited output tokens
+    num_predict: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,12 +68,14 @@ impl ChatMessage {
 }
 
 impl OllamaClient {
-    pub async fn chat(&self, model: &str, messages: Vec<ChatMessage>) -> Result<ChatResponse> {
+    pub async fn chat(&self, model: &str, messages: Vec<ChatMessage>, think: bool) -> Result<ChatResponse> {
         let url = format!("{}/api/chat", self.endpoint);
         let body = ChatRequest {
             model: model.to_string(),
             messages,
             stream: false,
+            think,
+            options: ChatOptions { num_ctx: self.num_ctx, num_predict: -1 },
         };
 
         let resp = self
@@ -102,12 +115,13 @@ impl OllamaClient {
         })
     }
 
-    #[allow(dead_code)]
     pub fn chat_stream(
         http: reqwest::Client,
         endpoint: String,
         model: String,
         messages: Vec<ChatMessage>,
+        think: bool,
+        num_ctx: u64,
         cancel: watch::Receiver<bool>,
     ) -> impl futures::Stream<Item = Result<ChatChunk>> {
         let url = format!("{}/api/chat", endpoint);
@@ -115,6 +129,8 @@ impl OllamaClient {
             model: model.clone(),
             messages,
             stream: true,
+            think,
+            options: ChatOptions { num_ctx, num_predict: -1 },
         };
 
         async_stream::stream! {
@@ -134,8 +150,9 @@ impl OllamaClient {
 
             let mut stream = resp.bytes_stream();
             let mut buffer = String::new();
+            let read_timeout = std::time::Duration::from_secs(300);
 
-            while let Some(chunk_result) = stream.next().await {
+            loop {
                 let cancelled = *cancel.borrow();
                 if cancelled {
                     yield Ok(ChatChunk {
@@ -145,6 +162,24 @@ impl OllamaClient {
                     });
                     return;
                 }
+
+                let chunk_result = match tokio::time::timeout(read_timeout, stream.next()).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => {
+                        // Stream ended without done:true — yield a final done chunk
+                        // so the consumer receives the content and can finish
+                        yield Ok(ChatChunk {
+                            content: String::new(),
+                            done: true,
+                            model: model.clone(),
+                        });
+                        return;
+                    }
+                    Err(_) => {
+                        yield Err(anyhow::anyhow!("Stream timed out (no data for 300s)"));
+                        return;
+                    }
+                };
 
                 let bytes = match chunk_result {
                     Ok(b) => b,
@@ -220,10 +255,13 @@ mod tests {
             model: "qwen3:4b".to_string(),
             messages: vec![ChatMessage::user("test")],
             stream: true,
+            think: true,
+            options: ChatOptions { num_ctx: 262144, num_predict: -1 },
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"stream\":true"));
         assert!(json.contains("\"model\":\"qwen3:4b\""));
+        assert!(json.contains("\"num_predict\":-1"));
     }
 
     #[tokio::test]
@@ -234,7 +272,7 @@ mod tests {
         };
         let client = OllamaClient::new(&config).unwrap();
         let result = client
-            .chat("nonexistent", vec![ChatMessage::user("hi")])
+            .chat("nonexistent", vec![ChatMessage::user("hi")], true)
             .await;
         assert!(result.is_err());
     }

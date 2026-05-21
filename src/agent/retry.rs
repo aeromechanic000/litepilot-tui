@@ -138,6 +138,7 @@ pub async fn chat_with_retry(
     user_request: &str,
     kind: ResponseKind,
     max_retries: usize,
+    think: bool,
 ) -> RetryResult {
     let mut attempts: Vec<(String, String)> = Vec::new();
     let mut last_response = String::new();
@@ -156,7 +157,7 @@ pub async fn chat_with_retry(
             ]
         };
 
-        let response = match client.chat(model, messages).await {
+        let response = match client.chat(model, messages, think).await {
             Ok(r) => r,
             Err(e) => {
                 return RetryResult::Failed {
@@ -229,6 +230,10 @@ pub enum PipelineResult {
     StreamChunk { content: String },
     /// Streaming finished — contains the full accumulated content
     StreamDone { content: String },
+    /// Plan step completed — awaiting user approval before execution
+    PlanReady { plan: String },
+    /// A plan step is starting (for multi-step execution)
+    StepStart { step: usize, total: usize, description: String },
 }
 
 #[cfg(test)]

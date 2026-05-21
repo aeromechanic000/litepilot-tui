@@ -87,7 +87,7 @@ async fn select(
         ChatMessage::user(prompt),
     ];
 
-    let response = client.chat(core_model, messages).await?;
+    let response = client.chat(core_model, messages, true).await?;
     let total = catalog.lines().count();
     Ok(parse_selection(&response.content, total, max_select))
 }

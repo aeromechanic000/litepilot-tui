@@ -3,6 +3,14 @@ use crate::skills::SkillRegistry;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// A single message in the conversation history sent to the LLM as context.
+#[derive(Debug, Clone)]
+pub struct ConversationMessage {
+    pub role: String,
+    pub content: String,
+    pub tokens: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppMode {
     Plan,
@@ -58,12 +66,16 @@ pub struct AppState {
     pub config: Config,
     pub workspace: PathBuf,
     pub web_search_enabled: bool,
+    pub think_enabled: bool,
     pub pending_confirmations: Vec<PendingAction>,
     pub awaiting_confirmation: bool,
     pub input_history: Vec<String>,
+    pub history_index: usize,
     pub skills: SkillRegistry,
     pub is_processing: bool,
     pub pending_queue: Vec<String>,
+    pub conversation_history: Vec<ConversationMessage>,
+    pub pending_plan: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -97,12 +109,16 @@ impl AppState {
             config: config.clone(),
             workspace,
             web_search_enabled: config.enable_free_web_search,
+            think_enabled: true,
             pending_confirmations: Vec::new(),
             awaiting_confirmation: false,
             input_history: Vec::new(),
+            history_index: 0,
             skills,
             is_processing: false,
             pending_queue: Vec::new(),
+            conversation_history: Vec::new(),
+            pending_plan: None,
         }
     }
 

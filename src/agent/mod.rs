@@ -71,7 +71,7 @@ impl<'a> AgentPipeline<'a> {
             )),
         ];
         let model = self.config.effective_fast_model();
-        let response = self.client.chat(model, messages).await?;
+        let response = self.client.chat(model, messages, true).await?;
         Ok(Self::parse_plan(&response.content))
     }
 
@@ -107,7 +107,7 @@ impl<'a> AgentPipeline<'a> {
             )),
         ];
         let model = self.config.effective_fast_model();
-        let response = self.client.chat(model, messages).await?;
+        let response = self.client.chat(model, messages, true).await?;
         Ok(Self::parse_plan(&response.content))
     }
 
@@ -135,7 +135,7 @@ impl<'a> AgentPipeline<'a> {
             )),
         ];
         let model = &self.config.core_model;
-        let response = self.client.chat(model, messages).await?;
+        let response = self.client.chat(model, messages, true).await?;
         Ok(Self::parse_file_changes(&response.content))
     }
 
@@ -153,7 +153,7 @@ impl<'a> AgentPipeline<'a> {
             )),
         ];
         let model = self.config.effective_audit_model();
-        let response = self.client.chat(model, messages).await?;
+        let response = self.client.chat(model, messages, true).await?;
         Ok(Self::parse_audit(&response.content))
     }
 

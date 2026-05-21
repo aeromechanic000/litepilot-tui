@@ -23,6 +23,8 @@ pub struct UiState {
     pub thinking_tick: u8,
     /// Stores full multi-line paste content; input_text shows the summary
     paste_buffer: Option<String>,
+    /// Remembers the last user input for plan approval flow
+    pub last_user_input: String,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +45,8 @@ pub enum OutputLine {
     },
     Thinking(()),
     Pending(String),
+    Plan(String),
+    Separator,
 }
 
 impl Default for UiState {
@@ -58,6 +62,7 @@ impl Default for UiState {
             workspace_hint: PathBuf::new(),
             thinking_tick: 0,
             paste_buffer: None,
+            last_user_input: String::new(),
         }
     }
 }
@@ -215,12 +220,15 @@ pub fn draw(f: &mut Frame, app: &AppState, ui: &mut UiState) {
     let max_input = (size.height / 5).max(4).min(15); // 20% of terminal, min 4, max 15
     let input_height = (input_content_lines + 1).max(3).min(max_input);
 
+    // Status bar is always 2 lines
+    let status_bar_height: u16 = 2;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),         // status bar
-            Constraint::Min(5),            // main area
-            Constraint::Length(input_height), // input area
+            Constraint::Length(status_bar_height), // status bar (wraps if needed)
+            Constraint::Min(5),                    // main area
+            Constraint::Length(input_height),      // input area
         ])
         .split(size);
 
@@ -230,22 +238,27 @@ pub fn draw(f: &mut Frame, app: &AppState, ui: &mut UiState) {
     let visible_content_rows = chunks[2].height.saturating_sub(1) as usize; // -1 for border
     let has_overflow = input_content_lines as usize > visible_content_rows;
     draw_input_area(f, ui, chunks[2], has_overflow);
+
+    // Place visible cursor in the input area
+    set_input_cursor(f, ui, chunks[2]);
+}
+
+fn think_mode_label(enabled: &bool) -> &'static str {
+    if *enabled { "THINK" } else { "DIRECT" }
 }
 
 fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
     let theme = &ui.theme;
     let (mode_label, mode_color) = theme.mode_indicator(&app.mode);
-
-    let search_indicator = if app.web_search_enabled {
-        "SEARCH:ON"
-    } else {
-        "SEARCH:OFF"
-    };
+    let think_label = think_mode_label(&app.think_enabled);
     let fast = truncate_model_name(app.config.effective_fast_model(), 12);
     let core = truncate_model_name(&app.config.core_model, 12);
     let audit = truncate_model_name(app.config.effective_audit_model(), 12);
 
-    let mut spans = vec![
+    let think_color = if app.think_enabled { theme.accent } else { theme.warning };
+
+    // Line 1: LitePilot | endpoint | models
+    let line1 = Line::from(vec![
         Span::styled(
             " LitePilot ",
             Style::default()
@@ -260,13 +273,19 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
         Span::raw(format!("C:{}", core)),
         Span::raw(" "),
         Span::raw(format!("A:{}", audit)),
-        Span::raw(" | "),
+    ]);
+
+    // Line 2: mode | think | workspace
+    let mut line2_spans = vec![
         Span::styled(
-            format!("[{}]", mode_label),
+            format!(" [{}] ", mode_label),
             Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" | "),
-        Span::raw(search_indicator),
+        Span::raw("| "),
+        Span::styled(
+            format!("[{}]", think_label),
+            Style::default().fg(think_color).add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" | "),
         Span::raw(truncate_path(
             &app.workspace.to_string_lossy(),
@@ -275,14 +294,16 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
     ];
 
     if !app.pending_queue.is_empty() {
-        spans.push(Span::raw(" | "));
-        spans.push(Span::styled(
+        line2_spans.push(Span::raw(" | "));
+        line2_spans.push(Span::styled(
             format!("({} queued)", app.pending_queue.len()),
             Style::default().fg(theme.accent),
         ));
     }
 
-    let status = Paragraph::new(Line::from(spans));
+    let line2 = Line::from(line2_spans);
+
+    let status = Paragraph::new(vec![line1, line2]);
     f.render_widget(status, area);
 }
 
@@ -304,34 +325,95 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
         .output_lines
         .iter()
         .flat_map(|ol| match ol {
-            OutputLine::User(text) => vec![Line::from(Span::styled(
-                format!("> {}", text),
-                Style::default(),
-            ))],
-            OutputLine::Assistant(text) => render_markdown(text, theme),
-            OutputLine::System(text) => vec![Line::from(Span::styled(
-                format!("[system] {}", text),
-                Style::default().fg(theme.accent),
-            ))],
-            OutputLine::Error(text) => vec![Line::from(Span::styled(
-                format!("[error] {}", text),
-                Style::default().fg(theme.warning),
-            ))],
+            OutputLine::User(text) => vec![Line::from(vec![
+                Span::styled(
+                    "\u{25b6} ", // ▶ RIGHT-POINTING TRIANGLE
+                    Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(text.clone(), Style::default().add_modifier(Modifier::BOLD)),
+            ])],
+            OutputLine::Assistant(text) => {
+                let mut rendered = render_markdown(text, theme);
+                if let Some(first) = rendered.first_mut() {
+                    // Prepend ● BLACK CIRCLE marker by rebuilding the line
+                    let old = std::mem::take(first);
+                    let marker = Span::styled(
+                        "\u{25cf} ", // ● BLACK CIRCLE
+                        Style::default(),
+                    );
+                    let mut new_spans = vec![marker];
+                    new_spans.extend(old.spans);
+                    *first = Line::from(new_spans);
+                }
+                rendered
+            }
+            OutputLine::System(text) => vec![Line::from(vec![
+                Span::styled(
+                    "\u{203b} ", // ※ REFERENCE MARK
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(text.clone(), Style::default().fg(Color::Reset)),
+            ])],
+            OutputLine::Error(text) => vec![Line::from(vec![
+                Span::styled(
+                    "\u{2717} ", // ✗ BALLOT X
+                    Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(text.clone(), Style::default().fg(theme.warning)),
+            ])],
             OutputLine::Code { language, code } => render_code_block(language, code, theme),
             OutputLine::Thinking(_) => {
                 let dots = ".".repeat(((tick / 4) % 3 + 1) as usize);
                 vec![Line::from(Span::styled(
-                    format!("  thinking{}", dots),
+                    format!("\u{2234} thinking{}", dots), // ∴ THEREFORE
                     Style::default()
                         .fg(theme.accent)
                         .add_modifier(Modifier::ITALIC),
                 ))]
             }
-            OutputLine::Pending(text) => vec![Line::from(Span::styled(
-                format!("> {} (queued)", text),
-                Style::default().fg(theme.accent),
-            ))],
+            OutputLine::Pending(text) => vec![Line::from(vec![
+                Span::styled(
+                    "\u{25b8} ", // ▸ SMALL RIGHT-POINTING TRIANGLE
+                    Style::default().fg(theme.accent),
+                ),
+                Span::styled(
+                    format!("{} (queued)", text),
+                    Style::default().fg(theme.accent),
+                ),
+            ])],
+            OutputLine::Plan(plan) => {
+                let mut lines = vec![Line::from(Span::styled(
+                    "\u{25c6} Plan".to_string(), // ◆ BLACK DIAMOND
+                    Style::default()
+                        .fg(theme.primary)
+                        .add_modifier(Modifier::BOLD),
+                ))];
+                for step in plan.lines() {
+                    let trimmed = step.trim();
+                    if !trimmed.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", trimmed),
+                            Style::default().fg(Color::Reset),
+                        )));
+                    }
+                }
+                lines
+            }
             OutputLine::Diff { added, removed } => render_diff(added, removed, theme),
+            OutputLine::Separator => vec![Line::from(vec![
+                Span::styled(
+                    "\u{2500}".repeat(20), // ────────
+                    Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    " done ",
+                    Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+                ),
+                Span::styled(
+                    "\u{2500}".repeat(20),
+                    Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+                ),
+            ])],
         })
         .collect();
 
@@ -569,11 +651,36 @@ fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect, has_overflow: bool) 
             .borders(Borders::TOP)
             .border_style(Style::default().fg(theme.primary))
             .title(Span::styled(
-                " Shift+Tab:mode | Enter:send | Ctrl+S:search | Ctrl+C:quit ",
+                " Shift+Tab:mode | Enter:send | Shift+Enter:↵ | Ctrl+Tab:think | Ctrl+C:quit ",
                 Style::default().fg(theme.accent),
             )),
     );
     f.render_widget(input, area);
+}
+
+/// Position the terminal cursor at the current input cursor location.
+fn set_input_cursor(f: &mut Frame, ui: &UiState, area: Rect) {
+    let text_width = area.width.saturating_sub(3) as usize; // " > " takes 3 cols
+    if text_width == 0 {
+        return;
+    }
+
+    // Count characters before the cursor position
+    let chars_before: usize = ui.input_text[..ui.input_cursor]
+        .chars()
+        .count();
+
+    // The first line has a 3-char " > " prefix, continuation lines have "   "
+    let prefix = 3u16;
+    let line = (chars_before / text_width) as u16;
+    let col = (chars_before % text_width) as u16;
+
+    let x = area.x + prefix + col;
+    let y = area.y + 1 + line; // +1 for the top border
+
+    if y < area.y + area.height {
+        f.set_cursor_position((x, y));
+    }
 }
 
 /// Break text into lines that fit within `width` characters.

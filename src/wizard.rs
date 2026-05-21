@@ -6,7 +6,7 @@ use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Terminal;
@@ -16,6 +16,7 @@ use std::io;
 pub enum WizardStep {
     UrlInput,
     Connecting,
+    ContextSelect,
     ModelSelect,
     Confirm,
 }
@@ -53,6 +54,10 @@ impl ModelSlot {
     }
 }
 
+const CONTEXT_OPTIONS: [u64; 5] = [65536, 131072, 262144, 524288, 1048576];
+const CONTEXT_LABELS: [&str; 5] = ["64k", "128k", "256k", "512k", "1M"];
+const DEFAULT_CONTEXT_INDEX: usize = 2; // 256k
+
 struct WizardState {
     step: WizardStep,
     url: String,
@@ -66,6 +71,7 @@ struct WizardState {
     core_model: Option<String>,
     audit_model: Option<String>,
     error_msg: Option<String>,
+    context_index: usize,
 }
 
 impl WizardState {
@@ -88,6 +94,7 @@ impl WizardState {
             core_model: None,
             audit_model: None,
             error_msg: None,
+            context_index: DEFAULT_CONTEXT_INDEX,
         };
         // Pre-fill from existing config if present
         if !existing_config.fast_model.is_empty() {
@@ -98,6 +105,10 @@ impl WizardState {
         }
         if !existing_config.audit_model.is_empty() {
             state.audit_model = Some(existing_config.audit_model.clone());
+        }
+        // Pre-fill context window from config
+        if let Some(idx) = CONTEXT_OPTIONS.iter().position(|&v| v == existing_config.context_window_limit) {
+            state.context_index = idx;
         }
         state
     }
@@ -160,8 +171,9 @@ impl WizardState {
         match self.step {
             WizardStep::UrlInput => 1,
             WizardStep::Connecting => 2,
-            WizardStep::ModelSelect => 3,
-            WizardStep::Confirm => 4,
+            WizardStep::ContextSelect => 3,
+            WizardStep::ModelSelect => 4,
+            WizardStep::Confirm => 5,
         }
     }
 
@@ -171,6 +183,7 @@ impl WizardState {
             fast_model: self.fast_model.unwrap_or_default(),
             core_model: self.core_model.unwrap_or_default(),
             audit_model: self.audit_model.unwrap_or_default(),
+            context_window_limit: CONTEXT_OPTIONS[self.context_index],
             ..base.clone()
         }
     }
@@ -223,6 +236,7 @@ fn handle_key(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -
     match state.step {
         WizardStep::UrlInput => handle_url_input(state, modifiers, code),
         WizardStep::Connecting => Action::Continue,
+        WizardStep::ContextSelect => handle_context_select(state, modifiers, code),
         WizardStep::ModelSelect => handle_model_select(state, modifiers, code),
         WizardStep::Confirm => handle_confirm(state, modifiers, code),
     }
@@ -252,15 +266,14 @@ fn try_connect(state: &mut WizardState) {
             if models.is_empty() {
                 state.error_msg =
                     Some("No models found. Pull models with: ollama pull <model>".into());
-                state.step = WizardStep::ModelSelect;
             } else {
                 state.models = models;
                 state.selected_index = 0;
                 state.scroll_offset = 0;
                 state.current_slot = ModelSlot::Fast;
                 state.jump_to_existing_model();
-                state.step = WizardStep::ModelSelect;
             }
+            state.step = WizardStep::ContextSelect;
         }
         Err(e) => {
             state.error_msg = Some(format!("Connection failed: {}", e));
@@ -301,6 +314,34 @@ fn handle_url_input(state: &mut WizardState, modifiers: KeyModifiers, code: KeyC
             if state.input_cursor < state.input_text.len() {
                 state.input_cursor += 1;
             }
+            Action::Continue
+        }
+        _ => Action::Continue,
+    }
+}
+
+fn handle_context_select(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -> Action {
+    match (modifiers, code) {
+        (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
+        (KeyModifiers::NONE, KeyCode::Left) => {
+            if state.context_index > 0 {
+                state.context_index -= 1;
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Right) => {
+            if state.context_index < CONTEXT_OPTIONS.len() - 1 {
+                state.context_index += 1;
+            }
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Enter) => {
+            state.step = WizardStep::ModelSelect;
+            Action::Continue
+        }
+        (KeyModifiers::NONE, KeyCode::Esc) => {
+            state.step = WizardStep::UrlInput;
+            state.error_msg = None;
             Action::Continue
         }
         _ => Action::Continue,
@@ -393,7 +434,7 @@ fn handle_confirm(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCod
             state.selected_index = 0;
             state.scroll_offset = 0;
             state.jump_to_existing_model();
-            state.step = WizardStep::ModelSelect;
+            state.step = WizardStep::ContextSelect;
             Action::Continue
         }
         _ => Action::Continue,
@@ -414,7 +455,7 @@ fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
     let y = (size.height.saturating_sub(content_height)) / 2;
     let area = Rect::new(x, y, content_width, content_height);
 
-    let step_label = format!("Step {}/4", state.step_number());
+    let step_label = format!("Step {}/5", state.step_number());
     let title = format!(" LitePilot Setup — {} ", step_label);
 
     let container = Block::default()
@@ -439,6 +480,7 @@ fn draw_wizard(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme) {
     match state.step {
         WizardStep::UrlInput => draw_url_input(f, state, theme, inner),
         WizardStep::Connecting => draw_connecting(f, state, theme, inner),
+        WizardStep::ContextSelect => draw_context_select(f, state, theme, inner),
         WizardStep::ModelSelect => draw_model_select(f, state, theme, inner),
         WizardStep::Confirm => draw_confirm(f, state, theme, inner),
     }
@@ -503,6 +545,56 @@ fn draw_connecting(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, a
         .style(Style::default())
         .alignment(Alignment::Center);
     f.render_widget(content, area);
+}
+
+fn draw_context_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
+    let lines = vec![
+        Line::from(Span::styled(
+            "Context Window Limit",
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from("Maximum context size for model input + output."),
+        Line::from("Larger values allow longer conversations but use more memory."),
+        Line::from(""),
+        Line::from("Select a size:"),
+    ];
+    let text_height = lines.len() as u16;
+    let content = Paragraph::new(lines).style(Style::default());
+    f.render_widget(content, area);
+
+    // Draw option pills in a row
+    let pill_y = area.y + text_height + 1;
+    let pill_width = 8u16;
+    let total_width = CONTEXT_LABELS.len() as u16 * (pill_width + 2);
+    let start_x = area.x + (area.width.saturating_sub(total_width)) / 2;
+
+    for (i, label) in CONTEXT_LABELS.iter().enumerate() {
+        let is_selected = i == state.context_index;
+        let x = start_x + (i as u16) * (pill_width + 2);
+
+        let style = if is_selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme.primary)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.accent)
+        };
+
+        let pill = Paragraph::new(format!(" {} ", label))
+            .style(style)
+            .alignment(Alignment::Center);
+        f.render_widget(pill, Rect::new(x, pill_y, pill_width, 1));
+    }
+
+    // Help bar
+    let help_y = area.y + area.height - 1;
+    let help = Paragraph::new("\u{2190}\u{2192}: select  |  Enter: continue  |  Esc: back")
+        .style(Style::default().fg(theme.accent));
+    f.render_widget(help, Rect::new(area.x, help_y, area.width, 1));
 }
 
 fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
@@ -634,6 +726,7 @@ fn draw_model_select(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme,
 }
 
 fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area: Rect) {
+    let context_label = CONTEXT_LABELS[state.context_index];
     let mut lines = vec![
         Line::from(Span::styled(
             "Configuration Summary",
@@ -648,6 +741,16 @@ fn draw_confirm(f: &mut ratatui::Frame, state: &WizardState, theme: &Theme, area
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled(&state.url, Style::default().fg(theme.primary)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Context:    ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} tokens", context_label),
+                Style::default().fg(theme.primary),
+            ),
         ]),
         Line::from(""),
     ];
@@ -761,11 +864,13 @@ mod tests {
         state.fast_model = Some("qwen3:4b".into());
         state.core_model = Some("qwen3:8b".into());
         state.audit_model = Some("qwen3:14b".into());
+        state.context_index = 3; // 512k
         let result = state.into_config(&config);
         assert_eq!(result.ollama_endpoint, "http://ollama:1234");
         assert_eq!(result.fast_model, "qwen3:4b");
         assert_eq!(result.core_model, "qwen3:8b");
         assert_eq!(result.audit_model, "qwen3:14b");
+        assert_eq!(result.context_window_limit, 524288);
         // Other fields preserved from base config
         assert_eq!(result.default_mode, "edit");
     }
@@ -777,9 +882,11 @@ mod tests {
         assert_eq!(state.step_number(), 1);
         state.step = WizardStep::Connecting;
         assert_eq!(state.step_number(), 2);
-        state.step = WizardStep::ModelSelect;
+        state.step = WizardStep::ContextSelect;
         assert_eq!(state.step_number(), 3);
-        state.step = WizardStep::Confirm;
+        state.step = WizardStep::ModelSelect;
         assert_eq!(state.step_number(), 4);
+        state.step = WizardStep::Confirm;
+        assert_eq!(state.step_number(), 5);
     }
 }

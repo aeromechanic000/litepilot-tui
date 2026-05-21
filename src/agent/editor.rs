@@ -19,7 +19,7 @@ pub async fn run_implementation(
         )),
     ];
 
-    let response = client.chat(model, messages).await?;
+    let response = client.chat(model, messages, true).await?;
     Ok(super::AgentPipeline::parse_file_changes(&response.content))
 }
 

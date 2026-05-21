@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 
 const DEFAULT_ENDPOINT: &str = "http://127.0.0.1:11434";
 
+fn default_context_window() -> u64 {
+    262144 // 256k tokens
+}
+
+fn default_max_file_lines() -> usize {
+    60
+}
+
 /// Theme colors stored as hex strings (e.g. "#315DFC").
 /// All other UI colors are derived from these three — normal text and
 /// backgrounds use terminal defaults ("reset").
@@ -20,8 +28,8 @@ pub struct ThemeColors {
 impl Default for ThemeColors {
     fn default() -> Self {
         Self {
-            primary: "skyblue".into(),
-            accent: "cyan".into(),
+            primary: "cyan".into(),
+            accent: "magenta".into(),
             warning: "yellow".into(),
         }
     }
@@ -34,7 +42,6 @@ pub struct Config {
     pub fast_model: String,
     pub core_model: String,
     pub audit_model: String,
-    pub code_base_path: String,
     pub default_mode: String,
     pub auto_mode_only_workspace: bool,
     pub enable_auto_syntax_check: bool,
@@ -47,6 +54,10 @@ pub struct Config {
     pub max_template_context_tokens: usize,
     pub template_max_select: usize,
     pub max_retries: usize,
+    #[serde(default = "default_context_window")]
+    pub context_window_limit: u64,
+    #[serde(default = "default_max_file_lines")]
+    pub max_file_lines: usize,
     #[serde(default)]
     pub theme: ThemeColors,
 }
@@ -59,7 +70,6 @@ impl Default for Config {
             fast_model: String::new(),
             core_model: String::new(),
             audit_model: String::new(),
-            code_base_path: "~/.litepilot/code_base".to_string(),
             default_mode: "edit".to_string(),
             auto_mode_only_workspace: true,
             enable_auto_syntax_check: true,
@@ -72,6 +82,8 @@ impl Default for Config {
             max_template_context_tokens: 2048,
             template_max_select: 5,
             max_retries: 3,
+            context_window_limit: 262144,
+            max_file_lines: 60,
             theme: ThemeColors::default(),
         }
     }
@@ -127,7 +139,7 @@ impl Config {
     }
 
     fn create_dir_structure(dir: &Path) -> Result<()> {
-        for sub in &["sessions", "cache", "code_base", "skills"] {
+        for sub in &["sessions", "cache", "code_base", "skills", "logs"] {
             std::fs::create_dir_all(dir.join(sub))
                 .with_context(|| format!("Creating directory {}", sub))?;
         }
@@ -187,12 +199,6 @@ impl Config {
             anyhow::bail!("default_mode must be one of: plan, edit, auto");
         }
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub fn code_base_dir(&self) -> PathBuf {
-        let expanded = shellexpand::tilde(&self.code_base_path).to_string();
-        PathBuf::from(expanded)
     }
 
     #[allow(dead_code)]
@@ -264,7 +270,7 @@ mod tests {
         assert!(config.validate().is_ok());
         assert_eq!(config.default_mode, "edit");
         assert_eq!(config.connect_timeout, 15);
-        assert_eq!(config.theme.primary, "skyblue");
+        assert_eq!(config.theme.primary, "cyan");
     }
 
     #[test]
@@ -272,8 +278,8 @@ mod tests {
         let config = Config::default();
         let toml_str = toml::to_string_pretty(&config).unwrap();
         assert!(toml_str.contains("[theme]"));
-        assert!(toml_str.contains("primary = \"skyblue\""));
-        assert!(toml_str.contains("accent = \"cyan\""));
+        assert!(toml_str.contains("primary = \"cyan\""));
+        assert!(toml_str.contains("accent = \"magenta\""));
     }
 
     #[test]
