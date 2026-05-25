@@ -163,11 +163,13 @@ fn run_app(
     });
 
     if let Ok(Ok(_)) = ping_result.join() {
+        tracing::info!("ollama ping OK: {}", app_state.config.ollama_endpoint);
         ui_state.add_output(OutputLine::System(format!(
             "Connected to Ollama at {}",
             app_state.config.ollama_endpoint
         )));
     } else {
+        tracing::error!("ollama ping FAILED: {}", app_state.config.ollama_endpoint);
         ui_state.add_output(OutputLine::Error(format!(
             "Cannot connect to Ollama at {}. Start Ollama first.",
             app_state.config.ollama_endpoint
@@ -236,14 +238,25 @@ fn run_app(
                     ui_state.stop_thinking();
                     ui_state.finish_stream();
                     tracing::info!("stream complete: {} bytes", content.len());
+                    if content.len() < 100 {
+                        tracing::warn!("suspiciously short response ({} bytes): {:?}", content.len(), content);
+                    } else {
+                        tracing::debug!("stream content (first 500 chars): {:.500}", content);
+                    }
                     // Record in conversation history
                     if !content.is_empty() {
+                        let tokens = util::text::estimate_tokens(&content);
+                        tracing::debug!("adding to conversation history: role=assistant, {} tokens", tokens);
                         app_state.conversation_history.push(ConversationMessage {
                             role: "assistant".into(),
                             content: content.clone(),
-                            tokens: util::text::estimate_tokens(&content),
+                            tokens,
                         });
+                        let history_before = app_state.conversation_history.len();
                         context::maybe_compact(&mut app_state.conversation_history, &app_state.config.core_model);
+                        if app_state.conversation_history.len() < history_before {
+                            tracing::info!("conversation history compacted: {} -> {} messages", history_before, app_state.conversation_history.len());
+                        }
                     }
                     let mode = app_state.mode;
                     // Execute bash blocks in Auto mode, show hint in Edit mode
@@ -265,6 +278,10 @@ fn run_app(
                     if !content.is_empty() {
                         let changes = agent::AgentPipeline::parse_file_changes(&content);
                         if !changes.is_empty() {
+                            tracing::info!("detected {} file change(s) in response", changes.len());
+                            for change in &changes {
+                                tracing::info!("  file change: {} {} ({} bytes content)", change.action, change.path.display(), change.content.len());
+                            }
                             match mode {
                                 AppMode::Auto => {
                                     auto_apply_changes(&app_state, &mut ui_state, &changes);
@@ -285,6 +302,7 @@ fn run_app(
                 }
                 agent::retry::PipelineResult::PlanReady { plan } => {
                     tracing::info!("plan ready: {} bytes", plan.len());
+                    tracing::debug!("plan content:\n{}", plan);
                     ui_state.stop_thinking();
                     if plan.starts_with("(plan unavailable") {
                         // Plan step failed — proceed without plan
@@ -328,6 +346,7 @@ fn run_app(
             // Drain next queued message if any
             if !app_state.pending_queue.is_empty() {
                 let next = app_state.pending_queue.remove(0);
+                tracing::info!("draining queued message: {:?} ({} remaining in queue)", next, app_state.pending_queue.len());
                 ui_state.add_output(OutputLine::System(
                     "Processing queued message...".to_string(),
                 ));
@@ -351,6 +370,7 @@ fn run_app(
                         KeyCode::Char('y') => {
                             // Apply the next pending file
                             if let Some(action) = app_state.pending_confirmations.pop() {
+                                tracing::info!("user confirmed: applying file ({} remaining)", app_state.pending_confirmations.len());
                                 let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
                                 apply_pending_action(&mut ui_state, &app_state, action, &sandbox);
                             }
@@ -369,6 +389,7 @@ fn run_app(
                         KeyCode::Char('n') => {
                             // Skip this file
                             if let Some(action) = app_state.pending_confirmations.pop() {
+                                tracing::info!("user skipped file ({} remaining)", app_state.pending_confirmations.len());
                                 let path = match &action {
                                     app::PendingAction::WriteFile { path, .. } => {
                                         path.display().to_string()
@@ -395,6 +416,7 @@ fn run_app(
                         }
                         KeyCode::Char('a') => {
                             // Apply all remaining
+                            tracing::info!("user chose apply-all for {} remaining file(s)", app_state.pending_confirmations.len());
                             let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
                             let remaining = std::mem::take(&mut app_state.pending_confirmations);
                             let total = remaining.len();
@@ -482,6 +504,7 @@ fn run_app(
                             app_state.input_history.push(input.clone());
                             app_state.history_index = 0;
                             tracing::info!("user input: {}", input.trim());
+                            tracing::debug!("conversation history: {} messages, queue: {}", app_state.conversation_history.len(), app_state.pending_queue.len());
                             ui_state.last_user_input = input.clone();
 
                             if input.trim() == "/quit" || input.trim() == "/exit" {
@@ -537,6 +560,7 @@ fn run_app(
                             } else if trimmed == "/apply" {
                                 // Apply file changes from the last assistant response
                                 tracing::info!("applying file changes, mode={}", app_state.mode);
+                                tracing::debug!("conversation history length: {} messages", app_state.conversation_history.len());
                                 let last_content =
                                     ui_state.output_lines.iter().rev().find_map(|ol| match ol {
                                         OutputLine::Assistant(t) => Some(t.clone()),
@@ -896,6 +920,11 @@ fn spawn_llm_request(
         ];
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
+        tracing::info!(
+            "spawn_llm_streaming: model={}, think={}, context_window={}, web_search={}",
+            model, think, context_window_limit, web_search_enabled
+        );
+
         let stream = ollama::OllamaClient::chat_stream(http, endpoint, model, messages, think, context_window_limit, cancel_rx);
 
         let mut pin = std::pin::pin!(stream);
@@ -906,14 +935,17 @@ fn spawn_llm_request(
             while let Some(chunk_result) = pin.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        if chunk.done {
-                            break;
-                        }
                         if !chunk.content.is_empty() {
                             let _ = tx.send(agent::retry::PipelineResult::StreamChunk {
                                 content: chunk.content.clone(),
                             });
                             full_content.push_str(&chunk.content);
+                        }
+                        if chunk.done {
+                            if chunk.done_reason.as_deref() == Some("length") {
+                                tracing::warn!("direct stream truncated (done_reason: length), {} bytes", full_content.len());
+                            }
+                            break;
                         }
                     }
                     Err(e) => {
@@ -966,6 +998,13 @@ fn spawn_plan_then_execute(
         .join("\n");
     let plan_mode = app_state.mode == AppMode::Plan;
     let workspace = app_state.workspace.clone();
+
+    tracing::info!(
+        "spawn_plan_then_execute: model={}, history_msgs={}, workspace={}",
+        fast_model,
+        app_state.conversation_history.len(),
+        workspace.display()
+    );
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
@@ -1079,6 +1118,15 @@ fn spawn_execution_with_plan(
     let now = current_datetime();
     let coding_system = apply_prompt_limits(agent::prompts::CODING_SYSTEM, max_file_lines);
 
+    tracing::info!(
+        "spawn_execution_with_plan: model={}, plan={} bytes, history_msgs={}, think={}, context_window={}",
+        model,
+        plan.len(),
+        history.len(),
+        think,
+        context_window_limit
+    );
+
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
             Ok(rt) => rt,
@@ -1114,18 +1162,19 @@ fn spawn_execution_with_plan(
             .filter_map(|line| {
                 let trimmed = line.trim();
                 if trimmed.is_empty() { return None; }
-                // Match numbered steps: "1. ..." or "1) ..."
-                let step = trimmed
-                    .strip_prefix(|c: char| c.is_ascii_digit())
-                    .and_then(|s| s.strip_prefix(|c: char| c.is_ascii_digit()))
-                    .and_then(|s| s.strip_prefix('.').or_else(|| s.strip_prefix(')')))
-                    .map(|s| s.trim().to_string());
-                step.filter(|s| !s.is_empty())
+                // Match numbered steps: "1. ..." or "12) ..."
+                let rest = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
+                if rest.len() == trimmed.len() { return None; } // no leading digits
+                rest.strip_prefix('.')
+                    .or_else(|| rest.strip_prefix(')'))
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
             })
             .collect();
 
         if steps.is_empty() {
             tracing::info!("no parseable steps in plan, executing as single request (plan: {} bytes)", plan.len());
+            tracing::warn!("plan had no numbered steps — content:\n{}", plan);
             // No parseable steps — execute as a single request
             let output_budget = context_window_limit / 4;
             let system_prompt = format!(
@@ -1145,7 +1194,8 @@ fn spawn_execution_with_plan(
         }
 
         let total_steps = steps.len();
-        tracing::info!("executing {} steps from plan", total_steps);
+        tracing::info!("executing {} steps from plan ({} bytes)", total_steps, plan.len());
+        tracing::debug!("plan content: {}", plan);
         for (i, s) in steps.iter().enumerate() {
             tracing::info!("  step {}: {}", i + 1, s);
         }
@@ -1204,6 +1254,14 @@ fn spawn_execution_with_plan(
 
             let step_content = stream_single_step(&rt, http.clone(), &endpoint, &model, messages, think, context_window_limit, &tx);
 
+            tracing::info!(
+                "step {}/{} complete: {} bytes, {} lines",
+                step_num, total_steps,
+                step_content.len(),
+                step_content.lines().count()
+            );
+            tracing::debug!("step {} content (first 300 chars): {:.300}", step_num, step_content);
+
             if step_content.starts_with("ERROR:") {
                 let _ = tx.send(agent::retry::PipelineResult::Retry(
                     agent::retry::RetryResult::Failed {
@@ -1219,12 +1277,21 @@ fn spawn_execution_with_plan(
             step_results.push(step_content);
         }
 
+        tracing::info!(
+            "all {} steps complete: total {} bytes, {} lines",
+            total_steps,
+            all_content.len(),
+            all_content.lines().count()
+        );
         let _ = tx.send(agent::retry::PipelineResult::StreamDone { content: all_content });
     });
 }
 
 /// Stream a single step's LLM call, returning the accumulated content.
 /// On error, returns a string starting with "ERROR:".
+/// Maximum number of auto-continuations when a response is truncated (done_reason: "length").
+const MAX_TRUNCATION_CONTINUATIONS: usize = 3;
+
 fn stream_single_step(
     rt: &tokio::runtime::Runtime,
     http: reqwest::Client,
@@ -1235,43 +1302,68 @@ fn stream_single_step(
     num_ctx: u64,
     tx: &mpsc::Sender<agent::retry::PipelineResult>,
 ) -> String {
-    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-    let stream = ollama::OllamaClient::chat_stream(
-        http, endpoint.to_string(), model.to_string(), messages, think, num_ctx, cancel_rx,
-    );
-    let mut pin = std::pin::pin!(stream);
     let tx = tx.clone();
+    let mut full_content = String::new();
+    let mut current_messages = messages;
 
-    let result: Result<String, String> = rt.block_on(async {
-        use futures::StreamExt;
-        let mut full_content = String::new();
-        while let Some(chunk_result) = pin.next().await {
-            match chunk_result {
-                Ok(chunk) => {
-                    if chunk.done {
-                        break;
+    for attempt in 0..=MAX_TRUNCATION_CONTINUATIONS {
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let stream = ollama::OllamaClient::chat_stream(
+            http.clone(), endpoint.to_string(), model.to_string(),
+            current_messages.clone(), think, num_ctx, cancel_rx,
+        );
+        let mut pin = std::pin::pin!(stream);
+
+        let chunk_result: Result<Option<String>, String> = rt.block_on(async {
+            use futures::StreamExt;
+            while let Some(chunk_result) = pin.next().await {
+                match chunk_result {
+                    Ok(chunk) => {
+                        if !chunk.content.is_empty() {
+                            let _ = tx.send(agent::retry::PipelineResult::StreamChunk {
+                                content: chunk.content.clone(),
+                            });
+                            full_content.push_str(&chunk.content);
+                        }
+                        if chunk.done {
+                            return Ok(chunk.done_reason);
+                        }
                     }
-                    if !chunk.content.is_empty() {
-                        let _ = tx.send(agent::retry::PipelineResult::StreamChunk {
-                            content: chunk.content.clone(),
-                        });
-                        full_content.push_str(&chunk.content);
+                    Err(e) => {
+                        return Err(format!("Stream error: {}", e));
                     }
-                }
-                Err(e) => {
-                    return Err(format!("Stream error: {}", e));
                 }
             }
+            Ok(None)
+        });
+
+        drop(cancel_tx);
+
+        match chunk_result {
+            Ok(done_reason) => {
+                let reason = done_reason.as_deref().unwrap_or("unknown");
+                if reason == "length" && attempt < MAX_TRUNCATION_CONTINUATIONS {
+                    tracing::warn!(
+                        "response truncated (done_reason: length), continuing (attempt {}/{}, {} bytes so far)",
+                        attempt + 1, MAX_TRUNCATION_CONTINUATIONS, full_content.len()
+                    );
+                    current_messages.push(ollama::chat::ChatMessage::assistant(&full_content));
+                    current_messages.push(ollama::chat::ChatMessage::user(
+                        "Your previous response was cut off due to length. Continue exactly from where you left off. Do not repeat what you already wrote.",
+                    ));
+                    continue;
+                }
+                tracing::info!("stream done: reason={}, {} bytes", reason, full_content.len());
+                return full_content;
+            }
+            Err(e) => {
+                return format!("ERROR: {}", e);
+            }
         }
-        Ok(full_content)
-    });
-
-    drop(cancel_tx);
-
-    match result {
-        Ok(content) => content,
-        Err(e) => format!("ERROR: {}", e),
     }
+
+    tracing::warn!("max continuations reached, returning {} bytes", full_content.len());
+    full_content
 }
 
 /// Spawn a skill-based request on a background thread.
@@ -1321,6 +1413,11 @@ fn spawn_skill_request(
         agent::retry::ResponseKind::Chat
     };
     let think = app_state.think_enabled;
+
+    tracing::info!(
+        "spawn_skill_request: skill={}, model={}, kind={:?}, max_retries={}, think={}",
+        skill.name, model, kind, max_retries, think
+    );
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
@@ -1404,6 +1501,10 @@ fn render_retry_result(ui_state: &mut ui::UiState, result: agent::retry::RetryRe
     // If the response contains file changes, present them for review
     let changes = agent::AgentPipeline::parse_file_changes(&content);
     if !changes.is_empty() {
+        tracing::info!("retry path: detected {} file change(s) in response", changes.len());
+        for change in &changes {
+            tracing::debug!("  retry file: {} {} ({} bytes)", change.action, change.path.display(), change.content.len());
+        }
         ui_state.add_output(OutputLine::System(format!(
             "Detected {} file change(s):",
             changes.len()
@@ -1463,7 +1564,16 @@ fn spawn_request_for_mode(
     input: &str,
     tx: mpsc::Sender<agent::retry::PipelineResult>,
 ) {
-    if app_state.mode == AppMode::Auto && looks_like_code_request(input) {
+    let is_code = looks_like_code_request(input);
+    tracing::info!(
+        "request routing: mode={}, is_code_request={}, pipeline={}",
+        app_state.mode,
+        is_code,
+        if app_state.mode == AppMode::Auto && is_code { "auto" } else { "plan_then_execute" }
+    );
+    tracing::debug!("input for routing: {:?}", input);
+
+    if app_state.mode == AppMode::Auto && is_code {
         spawn_auto_pipeline(app_state, input, tx);
     } else {
         spawn_plan_then_execute(app_state, client, input, tx);
@@ -1488,6 +1598,11 @@ fn spawn_auto_pipeline(
     let fast_model = app_state.config.effective_fast_model().to_string();
     let core_model = app_state.config.core_model.clone();
     let audit_model = app_state.config.effective_audit_model().to_string();
+
+    tracing::info!(
+        "spawn_auto_pipeline: fast={}, core={}, audit={}, max_retries={}, web_search={}",
+        fast_model, core_model, audit_model, max_retries, web_search_enabled
+    );
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
@@ -1546,6 +1661,10 @@ fn spawn_auto_pipeline(
 
         match result {
             Ok(changes) => {
+                tracing::info!("auto pipeline produced {} file change(s)", changes.len());
+                for c in &changes {
+                    tracing::info!("  auto: {} {} ({} bytes)", c.action, c.path.display(), c.content.len());
+                }
                 let applied: Vec<String> = changes
                     .iter()
                     .map(|c| format!("{} ({})", c.path.display(), c.action))
@@ -1553,6 +1672,7 @@ fn spawn_auto_pipeline(
                 let _ = tx.send(agent::retry::PipelineResult::AutoSuccess { changes, applied });
             }
             Err(e) => {
+                tracing::error!("auto pipeline failed: {}", e);
                 let _ = tx.send(agent::retry::PipelineResult::AutoFailed {
                     error: e.to_string(),
                 });
@@ -1664,11 +1784,13 @@ fn handle_run_command(app_state: &mut AppState, ui_state: &mut ui::UiState, cmd:
     match result {
         Some(output) => {
             if output.success {
+                tracing::info!("run success: {} {} (exit=0, stdout={} bytes)", bin, args.join(" "), output.stdout.len());
                 if !output.stdout.is_empty() {
                     ui_state.add_output(OutputLine::System(output.stdout.trim_end().to_string()));
                 }
                 ui_state.add_output(OutputLine::System("Done.".into()));
             } else {
+                tracing::warn!("run failed: {} {} (exit={:?})", bin, args.join(" "), output.exit_code);
                 ui_state.add_output(OutputLine::Error(format!(
                     "Exit {}: {}",
                     output.exit_code.unwrap_or(1),
@@ -1681,6 +1803,7 @@ fn handle_run_command(app_state: &mut AppState, ui_state: &mut ui::UiState, cmd:
             }
         }
         None => {
+            tracing::error!("run failed: {} {} (thread panicked)", bin, args.join(" "));
             ui_state.add_output(OutputLine::Error("Failed to execute command.".into()));
         }
     }
@@ -1729,6 +1852,8 @@ fn execute_bash_blocks(
     if blocks.is_empty() {
         return;
     }
+
+    tracing::info!("auto-executing {} bash block(s) in Auto mode", blocks.len());
 
     let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
     let executor = sandbox::executor::Executor::new(&sandbox);
@@ -1797,16 +1922,28 @@ fn execute_bash_blocks(
 /// Run web search and return formatted context string.
 /// Returns empty string if search fails or is disabled.
 async fn run_web_search(query: &str, max_tokens: usize) -> String {
+    tracing::info!("web search: query={:?}, max_tokens={}", query, max_tokens);
     let config = config::Config::default();
     let engine = search::SearchEngine::new(&config);
     match engine.search(query, max_tokens).await {
-        Ok(results) if !results.is_empty() => search::format_search_context(&results),
-        _ => String::new(),
+        Ok(results) if !results.is_empty() => {
+            tracing::info!("web search returned {} result(s)", results.len());
+            search::format_search_context(&results)
+        }
+        Ok(_) => {
+            tracing::warn!("web search returned 0 results for query={:?}", query);
+            String::new()
+        }
+        Err(e) => {
+            tracing::warn!("web search failed for query={:?}: {}", query, e);
+            String::new()
+        }
     }
 }
 
 /// Handle /uv subcommands: init, venv, add <pkg>, run <script>.
 fn handle_uv_command(app_state: &mut AppState, ui_state: &mut ui::UiState, args: &str) {
+    tracing::info!("uv command: {:?}", args);
     if !project::uv::UvManager::is_available() {
         ui_state.add_output(OutputLine::Error(
             "uv is not installed. Install it: https://docs.astral.sh/uv/".into(),
@@ -1927,6 +2064,7 @@ fn auto_apply_changes(
     ui_state: &mut ui::UiState,
     changes: &[agent::FileChange],
 ) {
+    tracing::info!("auto_apply_changes: {} file(s) to apply in {} mode", changes.len(), app_state.mode);
     let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
     let file_ops = project::file_ops::FileOps::new(&sandbox, app_state.mode);
 
@@ -1977,6 +2115,10 @@ fn enter_file_confirmation(
     ui_state: &mut ui::UiState,
     changes: &[agent::FileChange],
 ) {
+    tracing::info!("enter_file_confirmation: {} file(s) for review", changes.len());
+    for change in changes {
+        tracing::debug!("  confirm: {} {} ({} bytes)", change.action, change.path.display(), change.content.len());
+    }
     let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
     let file_ops = project::file_ops::FileOps::new(&sandbox, app_state.mode);
 
@@ -2060,10 +2202,11 @@ fn apply_pending_action(
     let file_ops = project::file_ops::FileOps::new(sandbox, app_state.mode);
     match action {
         app::PendingAction::WriteFile {
-            path,
-            content,
+            ref path,
+            ref content,
             diff_preview: _,
         } => {
+            tracing::info!("applying write: {} ({} bytes)", path.display(), content.len());
             let fc = file_ops.prepare_write(&path, &content);
             match fc {
                 Ok(fc) => match file_ops.apply_change(&fc) {
@@ -2089,7 +2232,8 @@ fn apply_pending_action(
                 }
             }
         }
-        app::PendingAction::DeleteFile { path } => {
+        app::PendingAction::DeleteFile { ref path } => {
+            tracing::info!("applying delete: {}", path.display());
             let fc = file_ops.prepare_delete(&path);
             match fc {
                 Ok(fc) => match file_ops.apply_change(&fc) {
@@ -2142,9 +2286,11 @@ fn run_syntax_check(
     if let Some(result) = check_result {
         match result {
             agent::syntax::SyntaxResult::Pass => {
+                tracing::debug!("syntax check PASS: {}", path_display);
                 ui_state.add_output(OutputLine::System(format!("  Syntax OK: {}", path_display)));
             }
             agent::syntax::SyntaxResult::Fail { errors } => {
+                tracing::warn!("syntax check FAIL: {} — {}", path_display, errors.lines().take(3).collect::<Vec<_>>().join("; "));
                 ui_state.add_output(OutputLine::Error(format!(
                     "  Syntax error in {}:\n  {}",
                     path_display,

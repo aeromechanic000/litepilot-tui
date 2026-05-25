@@ -33,6 +33,7 @@ struct ChatOptions {
 pub struct ChatChunk {
     pub content: String,
     pub done: bool,
+    pub done_reason: Option<String>,
     pub model: String,
 }
 
@@ -158,6 +159,7 @@ impl OllamaClient {
                     yield Ok(ChatChunk {
                         content: String::new(),
                         done: true,
+                        done_reason: Some("cancel".into()),
                         model: model.clone(),
                     });
                     return;
@@ -171,6 +173,7 @@ impl OllamaClient {
                         yield Ok(ChatChunk {
                             content: String::new(),
                             done: true,
+                            done_reason: Some("stream_end".into()),
                             model: model.clone(),
                         });
                         return;
@@ -209,6 +212,9 @@ impl OllamaClient {
                             let done = val.get("done")
                                 .and_then(|d| d.as_bool())
                                 .unwrap_or(false);
+                            let done_reason = val.get("done_reason")
+                                .and_then(|d| d.as_str())
+                                .map(|s| s.to_string());
                             let resp_model = val.get("model")
                                 .and_then(|m| m.as_str())
                                 .unwrap_or(&model)
@@ -217,6 +223,7 @@ impl OllamaClient {
                             yield Ok(ChatChunk {
                                 content,
                                 done,
+                                done_reason,
                                 model: resp_model,
                             });
 
