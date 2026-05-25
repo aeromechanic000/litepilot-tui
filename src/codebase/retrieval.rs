@@ -1,5 +1,5 @@
 use super::Template;
-use crate::agent::prompts::TEMPLATE_SELECTION_SYSTEM;
+use crate::agent::prompts::{self, TEMPLATE_SELECTION_SYSTEM};
 use crate::codebase::CodeBase;
 use crate::config::Config;
 use crate::ollama::chat::ChatMessage;
@@ -226,6 +226,208 @@ pub async fn retrieve(
     }
 }
 
+/// Two-stage retrieval with semantic reranking for higher precision.
+/// Stage 1: broad candidate selection via LLM (top `broad_select`).
+/// Stage 2: fast_model reranks candidates by code-aware semantic relevance.
+/// Falls back to `retrieve()` if reranking fails.
+#[allow(dead_code)]
+pub async fn retrieve_with_reranking(
+    client: &OllamaClient,
+    config: &Config,
+    codebase: &CodeBase,
+    user_request: &str,
+    project_context: &str,
+) -> LoadedTemplates {
+    let templates = codebase.templates();
+
+    if templates.is_empty() || config.core_model.is_empty() {
+        return LoadedTemplates {
+            refs: Vec::new(),
+            total_tokens: 0,
+            selected_count: 0,
+        };
+    }
+
+    let context_window = estimate_context_window(&config.core_model) as usize;
+    let request_tokens = estimate_tokens(user_request);
+    let context_tokens = estimate_tokens(project_context);
+    let fixed_overhead = 2500;
+    let budget = context_window
+        .saturating_sub(fixed_overhead)
+        .saturating_sub(request_tokens)
+        .saturating_sub(context_tokens);
+    let budget = budget.min(config.max_template_context_tokens);
+
+    if budget < 200 {
+        return LoadedTemplates {
+            refs: Vec::new(),
+            total_tokens: 0,
+            selected_count: 0,
+        };
+    }
+
+    // Stage 1: Broad selection — request more candidates than needed
+    let broad_select = config.template_max_select.max(10).min(templates.len());
+    let catalog = build_catalog(templates);
+    let broad_indices = match select(
+        client,
+        &config.core_model,
+        &catalog,
+        user_request,
+        project_context,
+        broad_select,
+    )
+    .await
+    {
+        Ok(indices) => indices,
+        Err(e) => {
+            tracing::warn!("Reranking stage 1 failed: {}, falling back", e);
+            return retrieve(client, config, codebase, user_request, project_context).await;
+        }
+    };
+
+    if broad_indices.is_empty() {
+        return LoadedTemplates {
+            refs: Vec::new(),
+            total_tokens: 0,
+            selected_count: 0,
+        };
+    }
+
+    // If few candidates, skip reranking (not enough to meaningfully reorder)
+    if broad_indices.len() <= 3 {
+        let selected_count = broad_indices.len();
+        let (refs, total_tokens) = load_within_budget(templates, &broad_indices, budget);
+        return LoadedTemplates {
+            refs,
+            total_tokens,
+            selected_count,
+        };
+    }
+
+    // Stage 2: Rerank with fast_model
+    let reranked = match rerank(
+        client,
+        config,
+        templates,
+        &broad_indices,
+        user_request,
+        project_context,
+    )
+    .await
+    {
+        Ok(indices) => indices,
+        Err(e) => {
+            tracing::warn!("Reranking stage 2 failed: {}, using original order", e);
+            broad_indices
+        }
+    };
+
+    let selected_count = reranked.len();
+    let (refs, total_tokens) = load_within_budget(templates, &reranked, budget);
+
+    LoadedTemplates {
+        refs,
+        total_tokens,
+        selected_count,
+    }
+}
+
+/// Rerank candidate template indices using fast_model.
+/// Sends code snippets (first 500 chars each) and asks model to order by relevance.
+async fn rerank(
+    client: &OllamaClient,
+    config: &Config,
+    templates: &[Template],
+    indices: &[usize],
+    user_request: &str,
+    project_context: &str,
+) -> Result<Vec<usize>> {
+    let fast_model = config.effective_fast_model();
+    if fast_model.is_empty() {
+        return Ok(indices.to_vec());
+    }
+
+    let max_snippet_chars = 500;
+    let mut candidate_lines = Vec::with_capacity(indices.len());
+    for (rank, &idx) in indices.iter().enumerate() {
+        if let Some(t) = templates.get(idx) {
+            let snippet: String = t.content.chars().take(max_snippet_chars).collect();
+            candidate_lines.push(format!(
+                "{}. [{}] {} (lang: {}) — {}\n{}",
+                rank + 1,
+                t.name,
+                t.description,
+                t.path.split('/').next().unwrap_or("?"),
+                t.tags.join(","),
+                snippet
+            ));
+        }
+    }
+
+    let truncated_context = truncate_project_context(project_context, 10);
+    let prompt = format!(
+        "TASK:\n{}\n\nPROJECT:\n{}\n\nCANDIDATES:\n{}\n\n\
+         Rank these candidates by relevance to the task. Output ONLY comma-separated indices in order of relevance (best first).",
+        user_request,
+        truncated_context,
+        candidate_lines.join("\n\n")
+    );
+
+    let messages = vec![
+        ChatMessage::system(prompts::RERANK_SYSTEM),
+        ChatMessage::user(prompt),
+    ];
+
+    let response = client.chat(fast_model, messages, true).await?;
+    let reranked = parse_rerank_response(&response.content, indices.len());
+
+    if reranked.is_empty() {
+        return Ok(indices.to_vec());
+    }
+
+    // Map reranked positions back to template indices
+    let result: Vec<usize> = reranked
+        .into_iter()
+        .filter_map(|pos| {
+            if pos >= 1 && pos <= indices.len() {
+                indices.get(pos - 1).copied()
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if result.is_empty() {
+        Ok(indices.to_vec())
+    } else {
+        Ok(result)
+    }
+}
+
+/// Parse rerank response into 1-based position indices.
+/// Extracts numbers and interprets them as candidate rank positions.
+fn parse_rerank_response(text: &str, max_count: usize) -> Vec<usize> {
+    let mut seen = std::collections::HashSet::new();
+    let positions: Vec<usize> = text
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|s| {
+            if s.is_empty() {
+                return None;
+            }
+            s.parse::<usize>().ok().and_then(|n| {
+                if n >= 1 && n <= max_count && seen.insert(n) {
+                    Some(n)
+                } else {
+                    None
+                }
+            })
+        })
+        .collect();
+
+    positions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,5 +554,35 @@ mod tests {
         let result = truncate_project_context(&ctx, 10);
         assert!(result.ends_with("..."));
         assert!(result.lines().count() == 11); // 10 lines + "..."
+    }
+
+    #[test]
+    fn parse_rerank_response_valid() {
+        let positions = parse_rerank_response("3,1,5", 5);
+        assert_eq!(positions, vec![3, 1, 5]);
+    }
+
+    #[test]
+    fn parse_rerank_response_with_text() {
+        let positions = parse_rerank_response("I recommend 2, then 4, then 1.", 5);
+        assert_eq!(positions, vec![2, 4, 1]);
+    }
+
+    #[test]
+    fn parse_rerank_response_filters_out_of_range() {
+        let positions = parse_rerank_response("1,6,99", 5);
+        assert_eq!(positions, vec![1]);
+    }
+
+    #[test]
+    fn parse_rerank_response_empty() {
+        let positions = parse_rerank_response("none", 5);
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn parse_rerank_response_dedup() {
+        let positions = parse_rerank_response("1,2,1,3,2", 5);
+        assert_eq!(positions, vec![1, 2, 3]);
     }
 }

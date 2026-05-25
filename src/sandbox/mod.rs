@@ -1,4 +1,6 @@
 pub mod executor;
+pub mod landlock;
+pub mod seatbelt;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -33,8 +35,8 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "cargo", "rustc", "rustup", "python", "python3", "uv", "pip", "pip3", "node", "npm", "npx",
     "bun", "deno", "go", "gcc", "g++", "make", "cmake", "git", "curl", "wget", "ls", "cat", "head",
     "tail", "find", "grep", "rg", "fd", "echo", "pwd", "which", "env", "dotnet", "java", "javac",
-    "bash", "sh", "zsh", "docker", "podman", "pytest", "jest", "vitest",
-    "mkdir", "touch", "cp", "mv", "test",
+    "bash", "sh", "zsh", "docker", "podman", "pytest", "jest", "vitest", "mkdir", "touch", "cp",
+    "mv", "test",
 ];
 
 #[allow(dead_code)]

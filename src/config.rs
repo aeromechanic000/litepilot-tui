@@ -49,6 +49,9 @@ pub struct Config {
     pub auto_run_after_fix: bool,
     pub enable_free_web_search: bool,
     pub auto_switch_network_region: bool,
+    pub enable_recap: bool,
+    pub enable_away_summary: bool,
+    pub auto_model_routing: bool,
     pub search_cache_valid_days: u64,
     pub max_search_context_tokens: usize,
     pub max_template_context_tokens: usize,
@@ -77,6 +80,9 @@ impl Default for Config {
             auto_run_after_fix: false,
             enable_free_web_search: true,
             auto_switch_network_region: true,
+            enable_recap: true,
+            enable_away_summary: true,
+            auto_model_routing: false,
             search_cache_valid_days: 30,
             max_search_context_tokens: 2048,
             max_template_context_tokens: 2048,
@@ -213,6 +219,11 @@ impl Config {
 
     pub fn skills_dir() -> Result<PathBuf> {
         Ok(Self::config_dir()?.join("skills"))
+    }
+
+    /// Directory for crash dumps: ~/.litepilot/crashes/
+    pub fn crashes_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("crashes"))
     }
 
     /// Returns true when the config needs first-run setup (core model not configured).

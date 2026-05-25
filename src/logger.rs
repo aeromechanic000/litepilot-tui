@@ -23,8 +23,7 @@ pub fn init(config_dir: &Path) -> (tracing_appender::non_blocking::WorkerGuard, 
     let file = std::fs::File::create(&log_path).expect("Failed to create log file");
     let (non_blocking, guard) = tracing_appender::non_blocking(file);
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let subscriber = tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -33,8 +32,7 @@ pub fn init(config_dir: &Path) -> (tracing_appender::non_blocking::WorkerGuard, 
         .with_ansi(false)
         .finish();
 
-    tracing::subscriber::set_global_default(subscriber)
-        .expect("Failed to set tracing subscriber");
+    tracing::subscriber::set_global_default(subscriber).expect("Failed to set tracing subscriber");
 
     (guard, log_path)
 }

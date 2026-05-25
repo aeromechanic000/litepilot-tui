@@ -173,7 +173,10 @@ impl UiState {
     }
 
     pub fn take_input(&mut self) -> String {
-        let input = self.paste_buffer.take().unwrap_or_else(|| self.input_text.clone());
+        let input = self
+            .paste_buffer
+            .take()
+            .unwrap_or_else(|| self.input_text.clone());
         self.input_text.clear();
         self.input_cursor = 0;
         input
@@ -217,7 +220,7 @@ pub fn draw(f: &mut Frame, app: &AppState, ui: &mut UiState) {
 
     // Calculate dynamic input height: grows with content, capped at 40% of terminal
     let input_content_lines = estimate_input_lines(&ui.input_text, size.width);
-    let max_input = (size.height / 5).max(4).min(15); // 20% of terminal, min 4, max 15
+    let max_input = (size.height / 5).clamp(4, 15); // 20% of terminal, min 4, max 15
     let input_height = (input_content_lines + 1).max(3).min(max_input);
 
     // Status bar is always 2 lines
@@ -244,7 +247,11 @@ pub fn draw(f: &mut Frame, app: &AppState, ui: &mut UiState) {
 }
 
 fn think_mode_label(enabled: &bool) -> &'static str {
-    if *enabled { "THINK" } else { "DIRECT" }
+    if *enabled {
+        "THINK"
+    } else {
+        "DIRECT"
+    }
 }
 
 fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
@@ -255,7 +262,11 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
     let core = truncate_model_name(&app.config.core_model, 12);
     let audit = truncate_model_name(app.config.effective_audit_model(), 12);
 
-    let think_color = if app.think_enabled { theme.accent } else { theme.warning };
+    let think_color = if app.think_enabled {
+        theme.accent
+    } else {
+        theme.warning
+    };
 
     // Line 1: LitePilot | endpoint | models
     let line1 = Line::from(vec![
@@ -284,7 +295,9 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
         Span::raw("| "),
         Span::styled(
             format!("[{}]", think_label),
-            Style::default().fg(think_color).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(think_color)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" | "),
         Span::raw(truncate_path(
@@ -328,7 +341,9 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
             OutputLine::User(text) => vec![Line::from(vec![
                 Span::styled(
                     "\u{25b6} ", // ▶ RIGHT-POINTING TRIANGLE
-                    Style::default().fg(theme.primary).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.primary)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(text.clone(), Style::default().add_modifier(Modifier::BOLD)),
             ])],
@@ -357,7 +372,9 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
             OutputLine::Error(text) => vec![Line::from(vec![
                 Span::styled(
                     "\u{2717} ", // ✗ BALLOT X
-                    Style::default().fg(theme.warning).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme.warning)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(text.clone(), Style::default().fg(theme.warning)),
             ])],
@@ -403,15 +420,21 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
             OutputLine::Separator => vec![Line::from(vec![
                 Span::styled(
                     "\u{2500}".repeat(20), // ────────
-                    Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::DIM),
                 ),
                 Span::styled(
                     " done ",
-                    Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::DIM),
                 ),
                 Span::styled(
                     "\u{2500}".repeat(20),
-                    Style::default().fg(theme.accent).add_modifier(Modifier::DIM),
+                    Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(Modifier::DIM),
                 ),
             ])],
         })
@@ -631,10 +654,7 @@ fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect, has_overflow: bool) 
                 Span::raw(chunk.clone()),
             ]));
         } else {
-            para_lines.push(Line::from(vec![
-                Span::raw("   "),
-                Span::raw(chunk.clone()),
-            ]));
+            para_lines.push(Line::from(vec![Span::raw("   "), Span::raw(chunk.clone())]));
         }
     }
 
@@ -666,9 +686,7 @@ fn set_input_cursor(f: &mut Frame, ui: &UiState, area: Rect) {
     }
 
     // Count characters before the cursor position
-    let chars_before: usize = ui.input_text[..ui.input_cursor]
-        .chars()
-        .count();
+    let chars_before: usize = ui.input_text[..ui.input_cursor].chars().count();
 
     // The first line has a 3-char " > " prefix, continuation lines have "   "
     let prefix = 3u16;
@@ -716,7 +734,7 @@ fn estimate_input_lines(text: &str, area_width: u16) -> u16 {
         return 1;
     }
     let char_count = text.chars().count();
-    ((char_count + text_width - 1) / text_width).max(1) as u16
+    char_count.div_ceil(text_width).max(1) as u16
 }
 
 fn truncate_model_name(name: &str, max: usize) -> String {

@@ -1,5 +1,10 @@
+use crate::agent::summarizer::SummarizerConfig;
+use crate::approval::ApprovalCache;
 use crate::config::Config;
+use crate::prompt::PromptBuilder;
+use crate::session::Session;
 use crate::skills::SkillRegistry;
+use crate::working_set::WorkingSet;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -76,6 +81,15 @@ pub struct AppState {
     pub pending_queue: Vec<String>,
     pub conversation_history: Vec<ConversationMessage>,
     pub pending_plan: Option<String>,
+    pub prompt_builder: PromptBuilder,
+    pub conversation_summary: Option<String>,
+    pub summarizer_config: SummarizerConfig,
+    pub working_set: WorkingSet,
+    pub current_session: Session,
+    pub approval_cache: ApprovalCache,
+    pub awaiting_destructive_confirm: bool,
+    pub snapshot_manager: crate::snapshot::SnapshotManager,
+    pub event_sink: crate::hooks::JsonlSink,
 }
 
 #[derive(Debug, Clone)]
@@ -104,10 +118,18 @@ impl AppState {
             .map(|dir| SkillRegistry::load_from_dir(&dir))
             .unwrap_or_else(|_| SkillRegistry::empty());
 
+        let mut prompt_builder = PromptBuilder::new(&config);
+        prompt_builder.set_mode(mode);
+        prompt_builder.set_skills(&skills);
+
+        let config_dir = Config::effective_dir(&workspace);
+        let instructions = crate::prompt::ProjectInstructions::discover(&workspace, &config_dir);
+        prompt_builder.set_project_context(instructions);
+
         Self {
             mode,
             config: config.clone(),
-            workspace,
+            workspace: workspace.clone(),
             web_search_enabled: config.enable_free_web_search,
             think_enabled: true,
             pending_confirmations: Vec::new(),
@@ -119,6 +141,22 @@ impl AppState {
             pending_queue: Vec::new(),
             conversation_history: Vec::new(),
             pending_plan: None,
+            prompt_builder,
+            conversation_summary: None,
+            summarizer_config: SummarizerConfig::default(),
+            working_set: WorkingSet::new(),
+            current_session: Session::new(),
+            approval_cache: ApprovalCache::new(),
+            awaiting_destructive_confirm: false,
+            snapshot_manager: crate::snapshot::SnapshotManager::new(&workspace, &config_dir),
+            event_sink: crate::hooks::JsonlSink::open(
+                &config_dir.join("logs").join("events.jsonl"),
+            )
+            .unwrap_or_else(|_| {
+                // Fallback to /tmp if config dir is unavailable
+                crate::hooks::JsonlSink::open(std::path::Path::new("/tmp/litepilot-events.jsonl"))
+                    .expect("Cannot create event sink")
+            }),
         }
     }
 

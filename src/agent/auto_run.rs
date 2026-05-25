@@ -9,8 +9,10 @@ use crate::sandbox::Sandbox;
 use anyhow::Result;
 use std::path::PathBuf;
 
+#[allow(dead_code)]
 const MAX_RETRIES: usize = 2;
 
+#[allow(dead_code)]
 pub async fn run_auto_pipeline(
     client: &OllamaClient,
     config: &Config,

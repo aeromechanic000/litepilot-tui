@@ -107,7 +107,10 @@ impl WizardState {
             state.audit_model = Some(existing_config.audit_model.clone());
         }
         // Pre-fill context window from config
-        if let Some(idx) = CONTEXT_OPTIONS.iter().position(|&v| v == existing_config.context_window_limit) {
+        if let Some(idx) = CONTEXT_OPTIONS
+            .iter()
+            .position(|&v| v == existing_config.context_window_limit)
+        {
             state.context_index = idx;
         }
         state
@@ -320,7 +323,11 @@ fn handle_url_input(state: &mut WizardState, modifiers: KeyModifiers, code: KeyC
     }
 }
 
-fn handle_context_select(state: &mut WizardState, modifiers: KeyModifiers, code: KeyCode) -> Action {
+fn handle_context_select(
+    state: &mut WizardState,
+    modifiers: KeyModifiers,
+    code: KeyCode,
+) -> Action {
     match (modifiers, code) {
         (KeyModifiers::CONTROL, KeyCode::Char('c')) => Action::Quit,
         (KeyModifiers::NONE, KeyCode::Left) => {

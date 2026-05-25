@@ -19,6 +19,8 @@ struct ChatRequest {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     think: bool,
     options: ChatOptions,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,14 +71,34 @@ impl ChatMessage {
 }
 
 impl OllamaClient {
-    pub async fn chat(&self, model: &str, messages: Vec<ChatMessage>, think: bool) -> Result<ChatResponse> {
+    pub async fn chat(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        _think: bool,
+    ) -> Result<ChatResponse> {
+        self.chat_with_tools(model, messages, &[]).await
+    }
+
+    /// Chat with optional tool definitions for agent loop.
+    pub async fn chat_with_tools(
+        &self,
+        model: &str,
+        messages: Vec<ChatMessage>,
+        tools: &[serde_json::Value],
+    ) -> Result<ChatResponse> {
         let url = format!("{}/api/chat", self.endpoint);
+        let _think = messages.iter().any(|m| m.role == "system");
         let body = ChatRequest {
             model: model.to_string(),
             messages,
             stream: false,
-            think,
-            options: ChatOptions { num_ctx: self.num_ctx, num_predict: -1 },
+            think: false,
+            options: ChatOptions {
+                num_ctx: self.num_ctx,
+                num_predict: -1,
+            },
+            tools: tools.to_vec(),
         };
 
         let resp = self
@@ -131,7 +153,11 @@ impl OllamaClient {
             messages,
             stream: true,
             think,
-            options: ChatOptions { num_ctx, num_predict: -1 },
+            options: ChatOptions {
+                num_ctx,
+                num_predict: -1,
+            },
+            tools: vec![],
         };
 
         async_stream::stream! {
@@ -153,6 +179,14 @@ impl OllamaClient {
             let mut buffer = String::new();
             let read_timeout = std::time::Duration::from_secs(300);
 
+            // Guardrails
+            let mut total_bytes: usize = 0;
+            const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024; // 10 MB
+            let start = std::time::Instant::now();
+            const MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(30 * 60); // 30 min
+            let mut error_count: usize = 0;
+            const MAX_ERRORS: usize = 5;
+
             loop {
                 let cancelled = *cancel.borrow();
                 if cancelled {
@@ -165,11 +199,17 @@ impl OllamaClient {
                     return;
                 }
 
+                // Wall-clock timeout
+                if start.elapsed() > MAX_DURATION {
+                    yield Err(anyhow::anyhow!(
+                        "Stream exceeded maximum duration (30 min), stopping"
+                    ));
+                    return;
+                }
+
                 let chunk_result = match tokio::time::timeout(read_timeout, stream.next()).await {
                     Ok(Some(result)) => result,
                     Ok(None) => {
-                        // Stream ended without done:true — yield a final done chunk
-                        // so the consumer receives the content and can finish
                         yield Ok(ChatChunk {
                             content: String::new(),
                             done: true,
@@ -186,11 +226,28 @@ impl OllamaClient {
 
                 let bytes = match chunk_result {
                     Ok(b) => b,
-                    Err(e) => {
-                        yield Err(anyhow::anyhow!("Stream read error: {}", e));
-                        return;
+                    Err(_) => {
+                        error_count += 1;
+                        if error_count >= MAX_ERRORS {
+                            yield Err(anyhow::anyhow!(
+                                "Too many stream errors ({})",
+                                error_count
+                            ));
+                            return;
+                        }
+                        // Tolerate individual errors up to the limit
+                        continue;
                     }
                 };
+
+                // Content size guard
+                total_bytes += bytes.len();
+                if total_bytes > MAX_CONTENT_BYTES {
+                    yield Err(anyhow::anyhow!(
+                        "Stream exceeded maximum content size (10 MB), stopping"
+                    ));
+                    return;
+                }
 
                 buffer.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -232,8 +289,12 @@ impl OllamaClient {
                             }
                         }
                         Err(e) => {
-                            yield Err(anyhow::anyhow!("JSON parse error: {} in line: {}", e, line));
-                            return;
+                            error_count += 1;
+                            if error_count >= MAX_ERRORS {
+                                yield Err(anyhow::anyhow!("JSON parse error: {} in line: {}", e, line));
+                                return;
+                            }
+                            // Tolerate individual parse errors
                         }
                     }
                 }
@@ -263,7 +324,11 @@ mod tests {
             messages: vec![ChatMessage::user("test")],
             stream: true,
             think: true,
-            options: ChatOptions { num_ctx: 262144, num_predict: -1 },
+            options: ChatOptions {
+                num_ctx: 262144,
+                num_predict: -1,
+            },
+            tools: vec![],
         };
         let json = serde_json::to_string(&req).unwrap();
         assert!(json.contains("\"stream\":true"));

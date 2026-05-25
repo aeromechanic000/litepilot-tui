@@ -214,11 +214,13 @@ pub enum PipelineResult {
     /// Direct chat or skill invocation result (non-streaming fallback)
     Retry(RetryResult),
     /// Auto pipeline completed — files were generated and applied
+    #[allow(dead_code)]
     AutoSuccess {
         changes: Vec<crate::agent::FileChange>,
         applied: Vec<String>,
     },
     /// Auto pipeline failed at some stage
+    #[allow(dead_code)]
     AutoFailed { error: String },
     /// Web search completed — results will be prepended to LLM context
     SearchDone {
@@ -233,7 +235,25 @@ pub enum PipelineResult {
     /// Plan step completed — awaiting user approval before execution
     PlanReady { plan: String },
     /// A plan step is starting (for multi-step execution)
-    StepStart { step: usize, total: usize, description: String },
+    StepStart {
+        step: usize,
+        total: usize,
+        description: String,
+    },
+    /// Context compaction completed — summary ready to inject
+    SummaryReady {
+        summary: String,
+        summarized_count: usize,
+    },
+    /// Agent loop tool execution started
+    ToolStart { tool_name: String, call_id: String },
+    /// Agent loop tool execution completed
+    ToolResultReady { result: crate::tools::ToolResult },
+    /// Post-write diagnostics found errors — correction needed
+    #[allow(dead_code)]
+    DiagnosticReady {
+        result: crate::agent::diagnostics::DiagnosticResult,
+    },
 }
 
 #[cfg(test)]

@@ -1,18 +1,27 @@
 mod agent;
 mod app;
+mod approval;
 mod codebase;
 mod config;
 mod context;
+mod hooks;
 mod logger;
+mod lsp;
 mod ollama;
 mod project;
+mod prompt;
+mod recap;
+mod router;
 mod sandbox;
 mod search;
 mod session;
 mod skills;
+mod snapshot;
+mod tools;
 mod ui;
 mod util;
 mod wizard;
+mod working_set;
 
 use anyhow::Result;
 use app::{AppMode, AppState, ConversationMessage};
@@ -40,16 +49,48 @@ struct Args {
     /// Working directory (defaults to current directory)
     #[arg(short, long)]
     dir: Option<String>,
+    /// Resume a previous session (latest, or by ID)
+    #[arg(long)]
+    resume: Option<Option<String>>,
+    /// List saved sessions
+    #[arg(long)]
+    sessions: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // Install crash dump handler early
+    install_crash_handler();
 
     // Determine workspace
     let workspace = match args.dir {
         Some(ref d) => PathBuf::from(d),
         None => std::env::current_dir()?,
     };
+
+    // Handle --sessions: list and exit
+    if args.sessions {
+        match session::persistence::list_sessions() {
+            Ok(sessions) if sessions.is_empty() => {
+                println!("No saved sessions.");
+            }
+            Ok(sessions) => {
+                println!("Saved sessions:\n");
+                for s in &sessions {
+                    println!(
+                        "  {}  ({} messages)  {}",
+                        &s.id[..8],
+                        s.message_count,
+                        s.preview
+                    );
+                    println!("    created: {}  updated: {}", s.created_at, s.updated_at);
+                }
+            }
+            Err(e) => eprintln!("Error listing sessions: {}", e),
+        }
+        return Ok(());
+    }
 
     // Setup config — use project-local .litepilot if present, else global ~/.litepilot
     let litepilot_dir = config::Config::ensure_dirs_for(&workspace)?;
@@ -86,9 +127,51 @@ fn main() -> Result<()> {
     // Run setup wizard — user confirms or changes Ollama URL and model selection
     let config = wizard::run(&mut terminal, config, &workspace)?;
 
+    // Load session if --resume was specified
+    let resume_session = match args.resume {
+        Some(Some(id)) => {
+            // Resume specific session by ID (prefix match)
+            match session::persistence::load_session(&id) {
+                Ok(s) => {
+                    tracing::info!(
+                        "resuming session {} ({} messages)",
+                        &s.id[..8],
+                        s.messages.len()
+                    );
+                    Some(s)
+                }
+                Err(e) => {
+                    tracing::warn!("failed to load session {}: {}", id, e);
+                    None
+                }
+            }
+        }
+        Some(None) => {
+            // --resume without ID: load latest session
+            match session::persistence::list_sessions() {
+                Ok(sessions) if !sessions.is_empty() => {
+                    let latest = &sessions[0]; // already sorted by updated_at desc
+                    match session::persistence::load_session(&latest.id) {
+                        Ok(s) => {
+                            tracing::info!(
+                                "resuming latest session {} ({} messages)",
+                                &s.id[..8],
+                                s.messages.len()
+                            );
+                            Some(s)
+                        }
+                        Err(_) => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        None => None,
+    };
+
     // Run app with panic recovery to ensure terminal is restored
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_app(&mut terminal, config, workspace)
+        run_app(&mut terminal, config, workspace, resume_session)
     }));
 
     tracing::info!("session ended");
@@ -119,9 +202,28 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     config: config::Config,
     workspace: PathBuf,
+    resume_session: Option<session::Session>,
 ) -> Result<()> {
     let mut ui_state = ui::UiState::from_config(&config).with_workspace(workspace.clone());
     let mut app_state = AppState::new(config, workspace);
+
+    // Resume session if provided
+    if let Some(session) = resume_session {
+        for msg in &session.messages {
+            match msg.role.as_str() {
+                "user" => ui_state.add_output(OutputLine::User(msg.content.clone())),
+                "assistant" => ui_state.add_output(OutputLine::Assistant(msg.content.clone())),
+                "system" => ui_state.add_output(OutputLine::System(msg.content.clone())),
+                _ => {}
+            }
+        }
+        app_state.current_session = session;
+        ui_state.add_output(OutputLine::System(format!(
+            "Resumed session {} ({} messages)",
+            &app_state.current_session.id[..8],
+            app_state.current_session.messages.len()
+        )));
+    }
 
     // Welcome message
     ui_state.add_output(OutputLine::System(
@@ -188,16 +290,67 @@ fn run_app(
                 agent::retry::PipelineResult::Retry(r) => {
                     app_state.is_processing = false;
                     ui_state.stop_thinking();
+                    // Emit structured completion event
                     match &r {
                         agent::retry::RetryResult::Success { content, attempts } => {
-                            tracing::info!("llm response: {} bytes (attempts={})", content.len(), attempts);
+                            app_state.event_sink.turn_complete(
+                                &app_state.config.core_model,
+                                content.len(),
+                                *attempts,
+                                0,
+                                0,
+                            );
                         }
-                        agent::retry::RetryResult::Exhausted { content, attempts, corrections } => {
-                            tracing::warn!("llm response exhausted retries: attempts={}, corrections={}", attempts, corrections.len());
+                        agent::retry::RetryResult::Exhausted {
+                            content, attempts, ..
+                        } => {
+                            app_state.event_sink.turn_complete(
+                                &app_state.config.core_model,
+                                content.len(),
+                                *attempts,
+                                0,
+                                0,
+                            );
+                        }
+                        agent::retry::RetryResult::Failed {
+                            last_error,
+                            attempts,
+                        } => {
+                            app_state
+                                .event_sink
+                                .emit(&hooks::HookEvent::error(last_error, "retry"));
+                            let _ = attempts; // used above
+                        }
+                    }
+                    match &r {
+                        agent::retry::RetryResult::Success { content, attempts } => {
+                            tracing::info!(
+                                "llm response: {} bytes (attempts={})",
+                                content.len(),
+                                attempts
+                            );
+                        }
+                        agent::retry::RetryResult::Exhausted {
+                            content,
+                            attempts,
+                            corrections,
+                        } => {
+                            tracing::warn!(
+                                "llm response exhausted retries: attempts={}, corrections={}",
+                                attempts,
+                                corrections.len()
+                            );
                             tracing::info!("llm response content: {} bytes", content.len());
                         }
-                        agent::retry::RetryResult::Failed { last_error, attempts } => {
-                            tracing::error!("llm failed after {} attempts: {}", attempts, last_error);
+                        agent::retry::RetryResult::Failed {
+                            last_error,
+                            attempts,
+                        } => {
+                            tracing::error!(
+                                "llm failed after {} attempts: {}",
+                                attempts,
+                                last_error
+                            );
                         }
                     }
                     render_retry_result(&mut ui_state, r);
@@ -239,23 +392,46 @@ fn run_app(
                     ui_state.finish_stream();
                     tracing::info!("stream complete: {} bytes", content.len());
                     if content.len() < 100 {
-                        tracing::warn!("suspiciously short response ({} bytes): {:?}", content.len(), content);
+                        tracing::warn!(
+                            "suspiciously short response ({} bytes): {:?}",
+                            content.len(),
+                            content
+                        );
                     } else {
                         tracing::debug!("stream content (first 500 chars): {:.500}", content);
                     }
                     // Record in conversation history
                     if !content.is_empty() {
                         let tokens = util::text::estimate_tokens(&content);
-                        tracing::debug!("adding to conversation history: role=assistant, {} tokens", tokens);
+                        tracing::debug!(
+                            "adding to conversation history: role=assistant, {} tokens",
+                            tokens
+                        );
                         app_state.conversation_history.push(ConversationMessage {
                             role: "assistant".into(),
                             content: content.clone(),
                             tokens,
                         });
+                        // Auto-save session
+                        app_state.current_session.add_message("assistant", &content);
+                        auto_save_session(&app_state);
                         let history_before = app_state.conversation_history.len();
-                        context::maybe_compact(&mut app_state.conversation_history, &app_state.config.core_model);
+                        context::maybe_compact(
+                            &mut app_state.conversation_history,
+                            &app_state.config.core_model,
+                        );
                         if app_state.conversation_history.len() < history_before {
-                            tracing::info!("conversation history compacted: {} -> {} messages", history_before, app_state.conversation_history.len());
+                            tracing::info!(
+                                "conversation history compacted: {} -> {} messages",
+                                history_before,
+                                app_state.conversation_history.len()
+                            );
+                        }
+                        // Check if background summarization is needed
+                        if app_state.conversation_summary.is_none()
+                            || app_state.conversation_history.len() > 20
+                        {
+                            maybe_trigger_summarization(&app_state, result_tx.clone());
                         }
                     }
                     let mode = app_state.mode;
@@ -266,7 +442,10 @@ fn run_app(
                         } else if mode == AppMode::Edit {
                             let bash_blocks = parse_bash_blocks(&content);
                             if !bash_blocks.is_empty() {
-                                let cmd_count: usize = bash_blocks.iter().map(|b| b.lines().filter(|l| !l.trim().is_empty()).count()).sum();
+                                let cmd_count: usize = bash_blocks
+                                    .iter()
+                                    .map(|b| b.lines().filter(|l| !l.trim().is_empty()).count())
+                                    .sum();
                                 ui_state.add_output(OutputLine::System(format!(
                                     "Detected {} command(s). Use /run <cmd> to execute.",
                                     cmd_count
@@ -278,16 +457,65 @@ fn run_app(
                     if !content.is_empty() {
                         let changes = agent::AgentPipeline::parse_file_changes(&content);
                         if !changes.is_empty() {
+                            for change in &changes {
+                                app_state.working_set.touch(&change.path);
+                            }
                             tracing::info!("detected {} file change(s) in response", changes.len());
                             for change in &changes {
-                                tracing::info!("  file change: {} {} ({} bytes content)", change.action, change.path.display(), change.content.len());
+                                tracing::info!(
+                                    "  file change: {} {} ({} bytes content)",
+                                    change.action,
+                                    change.path.display(),
+                                    change.content.len()
+                                );
                             }
                             match mode {
                                 AppMode::Auto => {
-                                    auto_apply_changes(&app_state, &mut ui_state, &changes);
+                                    auto_apply_changes(
+                                        &mut app_state,
+                                        &mut ui_state,
+                                        &changes,
+                                        &result_tx,
+                                    );
+                                    // Post-turn snapshot (non-fatal)
+                                    if let Err(e) =
+                                        app_state.snapshot_manager.post_turn("auto changes")
+                                    {
+                                        tracing::debug!("post-turn snapshot skipped: {}", e);
+                                    }
+                                    // End-of-turn recap for substantial auto changes
+                                    if changes.len() > 2 && app_state.config.enable_recap {
+                                        let history = app_state.conversation_history.clone();
+                                        let config = app_state.config.clone();
+                                        let tx = result_tx.clone();
+                                        std::thread::spawn(move || {
+                                            let rt = tokio::runtime::Runtime::new().unwrap();
+                                            let result = rt.block_on(async {
+                                                let client = ollama::OllamaClient::new(&config)?;
+                                                recap::generate_recap(&client, &history, &config)
+                                                    .await
+                                            });
+                                            if let Ok(summary) = result {
+                                                let _ =
+                                                    tx.send(agent::retry::PipelineResult::Retry(
+                                                        agent::retry::RetryResult::Success {
+                                                            content: format!(
+                                                                "Turn recap: {}",
+                                                                summary
+                                                            ),
+                                                            attempts: 0,
+                                                        },
+                                                    ));
+                                            }
+                                        });
+                                    }
                                 }
                                 AppMode::Edit => {
-                                    enter_file_confirmation(&mut app_state, &mut ui_state, &changes);
+                                    enter_file_confirmation(
+                                        &mut app_state,
+                                        &mut ui_state,
+                                        &changes,
+                                    );
                                 }
                                 AppMode::Plan => {
                                     ui_state.add_output(OutputLine::System(format!(
@@ -307,11 +535,14 @@ fn run_app(
                     if plan.starts_with("(plan unavailable") {
                         // Plan step failed — proceed without plan
                         ui_state.add_output(OutputLine::System(
-                            "Plan step skipped (fast model unavailable). Executing directly...".into(),
+                            "Plan step skipped (fast model unavailable). Executing directly..."
+                                .into(),
                         ));
                         ui_state.start_thinking();
                         spawn_execution_with_plan(
-                            &app_state, &ui_state.last_user_input, "",
+                            &app_state,
+                            &ui_state.last_user_input,
+                            "",
                             result_tx.clone(),
                         );
                     } else {
@@ -320,7 +551,9 @@ fn run_app(
                             // Auto/Plan mode: auto-execute
                             ui_state.start_thinking();
                             spawn_execution_with_plan(
-                                &app_state, &ui_state.last_user_input, &plan,
+                                &app_state,
+                                &ui_state.last_user_input,
+                                &plan,
                                 result_tx.clone(),
                             );
                         } else {
@@ -333,26 +566,97 @@ fn run_app(
                         }
                     }
                 }
-                agent::retry::PipelineResult::StepStart { step, total, description } => {
+                agent::retry::PipelineResult::StepStart {
+                    step,
+                    total,
+                    description,
+                } => {
                     ui_state.stop_thinking();
                     tracing::info!("executing step {}/{}: {}", step, total, description);
                     ui_state.add_output(OutputLine::System(format!(
-                        "Step {}/{}: {}", step, total, description
+                        "Step {}/{}: {}",
+                        step, total, description
                     )));
                     ui_state.start_thinking();
+                }
+                agent::retry::PipelineResult::SummaryReady {
+                    summary,
+                    summarized_count,
+                } => {
+                    tracing::info!(
+                        "conversation summarized: {} messages compacted, {} byte summary",
+                        summarized_count,
+                        summary.len()
+                    );
+                    app_state.conversation_summary = Some(summary);
+                    ui_state.add_output(OutputLine::System(format!(
+                        "Context compacted ({} messages summarized)",
+                        summarized_count
+                    )));
+                }
+                agent::retry::PipelineResult::ToolStart { tool_name, call_id } => {
+                    tracing::info!("tool started: {} ({})", tool_name, call_id);
+                    ui_state.add_output(OutputLine::System(format!("  Running: {}...", tool_name)));
+                }
+                agent::retry::PipelineResult::ToolResultReady { result } => {
+                    if result.success {
+                        tracing::info!(
+                            "tool completed: {} ({} bytes)",
+                            result.tool_name,
+                            result.output.len()
+                        );
+                        let preview: String = result.output.chars().take(200).collect();
+                        ui_state.add_output(OutputLine::System(format!(
+                            "  {} done: {}{}",
+                            result.tool_name,
+                            preview,
+                            if result.output.len() > 200 { "..." } else { "" }
+                        )));
+                    } else {
+                        tracing::warn!("tool failed: {} — {}", result.tool_name, result.output);
+                        ui_state.add_output(OutputLine::Error(format!(
+                            "  {} failed: {}",
+                            result.tool_name, result.output
+                        )));
+                    }
+                }
+                agent::retry::PipelineResult::DiagnosticReady { result: diag } => {
+                    if diag.has_errors() {
+                        tracing::warn!(
+                            "post-write diagnostics: {} errors in {} files",
+                            diag.errors.len(),
+                            diag.files_checked
+                        );
+                        for err in &diag.errors {
+                            let loc = match err.line {
+                                Some(l) => format!("{}:{}", err.file, l),
+                                None => err.file.clone(),
+                            };
+                            ui_state.add_output(OutputLine::Error(format!(
+                                "  diagnostic: {} — {}",
+                                loc, err.message
+                            )));
+                        }
+                    } else if diag.files_checked > 0 {
+                        tracing::info!("diagnostics passed for {} files", diag.files_checked);
+                    }
                 }
             }
 
             // Drain next queued message if any
             if !app_state.pending_queue.is_empty() {
                 let next = app_state.pending_queue.remove(0);
-                tracing::info!("draining queued message: {:?} ({} remaining in queue)", next, app_state.pending_queue.len());
+                tracing::info!(
+                    "draining queued message: {:?} ({} remaining in queue)",
+                    next,
+                    app_state.pending_queue.len()
+                );
                 ui_state.add_output(OutputLine::System(
                     "Processing queued message...".to_string(),
                 ));
                 ui_state.add_output(OutputLine::User(next.clone()));
                 ui_state.start_thinking();
-                spawn_request_for_mode(&app_state, &ollama_client, &next, result_tx.clone());
+                spawn_request_for_mode(&mut app_state, &ollama_client, &next, result_tx.clone());
                 app_state.is_processing = true;
             }
         }
@@ -364,471 +668,717 @@ fn run_app(
                     ui_state.set_paste(text);
                 }
                 Event::Key(key) => {
-                // Handle edit confirmation keys (y/n/a) when awaiting
-                if app_state.awaiting_confirmation && key.modifiers == KeyModifiers::NONE {
-                    match key.code {
-                        KeyCode::Char('y') => {
-                            // Apply the next pending file
-                            if let Some(action) = app_state.pending_confirmations.pop() {
-                                tracing::info!("user confirmed: applying file ({} remaining)", app_state.pending_confirmations.len());
-                                let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
-                                apply_pending_action(&mut ui_state, &app_state, action, &sandbox);
-                            }
-                            if app_state.pending_confirmations.is_empty() {
-                                app_state.awaiting_confirmation = false;
-                                ui_state
-                                    .add_output(OutputLine::System("All files reviewed.".into()));
-                            } else {
-                                ui_state.add_output(OutputLine::System(format!(
-                                    "Apply next? ({} remaining) y/n/a:",
-                                    app_state.pending_confirmations.len()
-                                )));
-                            }
-                            continue;
-                        }
-                        KeyCode::Char('n') => {
-                            // Skip this file
-                            if let Some(action) = app_state.pending_confirmations.pop() {
-                                tracing::info!("user skipped file ({} remaining)", app_state.pending_confirmations.len());
-                                let path = match &action {
-                                    app::PendingAction::WriteFile { path, .. } => {
-                                        path.display().to_string()
-                                    }
-                                    app::PendingAction::DeleteFile { path } => {
-                                        path.display().to_string()
-                                    }
-                                    app::PendingAction::ExecuteCommand { cmd, .. } => cmd.clone(),
-                                };
-                                ui_state
-                                    .add_output(OutputLine::System(format!("Skipped {}", path)));
-                            }
-                            if app_state.pending_confirmations.is_empty() {
-                                app_state.awaiting_confirmation = false;
-                                ui_state
-                                    .add_output(OutputLine::System("All files reviewed.".into()));
-                            } else {
-                                ui_state.add_output(OutputLine::System(format!(
-                                    "Apply next? ({} remaining) y/n/a:",
-                                    app_state.pending_confirmations.len()
-                                )));
-                            }
-                            continue;
-                        }
-                        KeyCode::Char('a') => {
-                            // Apply all remaining
-                            tracing::info!("user chose apply-all for {} remaining file(s)", app_state.pending_confirmations.len());
-                            let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
-                            let remaining = std::mem::take(&mut app_state.pending_confirmations);
-                            let total = remaining.len();
-                            let mut applied = 0;
-                            for action in remaining {
-                                apply_pending_action(&mut ui_state, &app_state, action, &sandbox);
-                                applied += 1;
-                            }
-                            app_state.awaiting_confirmation = false;
-                            ui_state.add_output(OutputLine::System(format!(
-                                "Applied {}/{} remaining file(s)",
-                                applied, total
-                            )));
-                            continue;
-                        }
-                        _ => {} // Fall through to normal key handling
-                    }
-                }
-
-                match (key.modifiers, key.code) {
-                    // Shift+Tab: switch mode (crossterm sends BackTab for Shift+Tab)
-                    (_, KeyCode::BackTab) => {
-                        let old_mode = app_state.mode;
-                        let new_mode = app_state.switch_mode();
-                        tracing::info!("mode switch: {} -> {}", old_mode, new_mode);
-                        ui_state.add_output(OutputLine::System(format!(
-                            "Switched to {} mode",
-                            new_mode
-                        )));
-                    }
-                    // Ctrl+C: quit
-                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                        tracing::info!("user requested quit (Ctrl+C)");
-                        if app_state.mode == AppMode::Auto {
-                            ui_state.add_output(OutputLine::System(
-                                "Press Ctrl+C again to confirm quit from AUTO mode".into(),
-                            ));
-                            // Simple double-press: check next event
-                            if event::poll(Duration::from_secs(2))? {
-                                if let Event::Key(k2) = event::read()? {
-                                    if k2.code == KeyCode::Char('c')
-                                        && k2.modifiers.contains(KeyModifiers::CONTROL)
-                                    {
-                                        break;
+                    // Handle edit confirmation keys (y/n/a) when awaiting
+                    if app_state.awaiting_confirmation && key.modifiers == KeyModifiers::NONE {
+                        match key.code {
+                            KeyCode::Char('y') => {
+                                // Destructive ops need double-key (YY)
+                                if app_state.awaiting_destructive_confirm {
+                                    app_state.awaiting_destructive_confirm = false;
+                                    // Second Y confirmed — proceed
+                                } else {
+                                    // Check if current action is destructive
+                                    if let Some(action) = app_state.pending_confirmations.last() {
+                                        let risk = pending_action_risk(action);
+                                        if risk == approval::RiskLevel::Destructive {
+                                            ui_state.add_output(OutputLine::System(
+                                                "Destructive! Press Y again to confirm.".into(),
+                                            ));
+                                            app_state.awaiting_destructive_confirm = true;
+                                            continue;
+                                        }
                                     }
                                 }
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                    // Ctrl+Tab: toggle model thinking
-                    (KeyModifiers::CONTROL, KeyCode::Tab) => {
-                        app_state.think_enabled = !app_state.think_enabled;
-                        let state = if app_state.think_enabled {
-                            "THINK"
-                        } else {
-                            "DIRECT"
-                        };
-                        tracing::info!("think mode: {}", state);
-                        ui_state.add_output(OutputLine::System(format!("Model mode: {}", state)));
-                    }
-                    // Shift+Enter: insert newline
-                    (KeyModifiers::SHIFT, KeyCode::Enter) => {
-                        ui_state.push_char('\n');
-                    }
-                    // Enter: submit input or approve pending plan
-                    (KeyModifiers::NONE, KeyCode::Enter) => {
-                        // Plan approval: empty input + pending plan = approve
-                        if ui_state.input_text.is_empty() {
-                            if let Some(plan) = app_state.pending_plan.take() {
-                                ui_state.add_output(OutputLine::System("Executing plan...".into()));
-                                ui_state.start_thinking();
-                                app_state.is_processing = true;
-                                spawn_execution_with_plan(
-                                    &app_state, &ui_state.last_user_input, &plan,
-                                    result_tx.clone(),
-                                );
+                                // Apply the next pending file
+                                if let Some(action) = app_state.pending_confirmations.pop() {
+                                    tracing::info!(
+                                        "user confirmed: applying file ({} remaining)",
+                                        app_state.pending_confirmations.len()
+                                    );
+                                    cache_approval_for_action(
+                                        &mut app_state.approval_cache,
+                                        &action,
+                                    );
+                                    let sandbox =
+                                        sandbox::Sandbox::new(app_state.workspace.clone());
+                                    apply_pending_action(
+                                        &mut ui_state,
+                                        &app_state,
+                                        action,
+                                        &sandbox,
+                                    );
+                                }
+                                if app_state.pending_confirmations.is_empty() {
+                                    app_state.awaiting_confirmation = false;
+                                    ui_state.add_output(OutputLine::System(
+                                        "All files reviewed.".into(),
+                                    ));
+                                } else {
+                                    ui_state.add_output(OutputLine::System(format!(
+                                        "Apply next? ({} remaining) y/n/a:",
+                                        app_state.pending_confirmations.len()
+                                    )));
+                                }
                                 continue;
                             }
+                            KeyCode::Char('n') => {
+                                // Skip this file
+                                if let Some(action) = app_state.pending_confirmations.pop() {
+                                    tracing::info!(
+                                        "user skipped file ({} remaining)",
+                                        app_state.pending_confirmations.len()
+                                    );
+                                    let path = match &action {
+                                        app::PendingAction::WriteFile { path, .. } => {
+                                            path.display().to_string()
+                                        }
+                                        app::PendingAction::DeleteFile { path } => {
+                                            path.display().to_string()
+                                        }
+                                        app::PendingAction::ExecuteCommand { cmd, .. } => {
+                                            cmd.clone()
+                                        }
+                                    };
+                                    ui_state.add_output(OutputLine::System(format!(
+                                        "Skipped {}",
+                                        path
+                                    )));
+                                }
+                                if app_state.pending_confirmations.is_empty() {
+                                    app_state.awaiting_confirmation = false;
+                                    ui_state.add_output(OutputLine::System(
+                                        "All files reviewed.".into(),
+                                    ));
+                                } else {
+                                    ui_state.add_output(OutputLine::System(format!(
+                                        "Apply next? ({} remaining) y/n/a:",
+                                        app_state.pending_confirmations.len()
+                                    )));
+                                }
+                                continue;
+                            }
+                            KeyCode::Char('a') => {
+                                // Apply all remaining
+                                tracing::info!(
+                                    "user chose apply-all for {} remaining file(s)",
+                                    app_state.pending_confirmations.len()
+                                );
+                                let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
+                                let remaining =
+                                    std::mem::take(&mut app_state.pending_confirmations);
+                                let total = remaining.len();
+                                let mut applied = 0;
+                                for action in &remaining {
+                                    cache_approval_for_action(
+                                        &mut app_state.approval_cache,
+                                        action,
+                                    );
+                                }
+                                for action in remaining {
+                                    apply_pending_action(
+                                        &mut ui_state,
+                                        &app_state,
+                                        action,
+                                        &sandbox,
+                                    );
+                                    applied += 1;
+                                }
+                                app_state.awaiting_confirmation = false;
+                                ui_state.add_output(OutputLine::System(format!(
+                                    "Applied {}/{} remaining file(s)",
+                                    applied, total
+                                )));
+                                continue;
+                            }
+                            _ => {} // Fall through to normal key handling
                         }
+                    }
 
-                        let input = ui_state.take_input();
-                        if !input.is_empty() {
-                            app_state.input_history.push(input.clone());
-                            app_state.history_index = 0;
-                            tracing::info!("user input: {}", input.trim());
-                            tracing::debug!("conversation history: {} messages, queue: {}", app_state.conversation_history.len(), app_state.pending_queue.len());
-                            ui_state.last_user_input = input.clone();
-
-                            if input.trim() == "/quit" || input.trim() == "/exit" {
-                                tracing::info!("session ending via /{}", input.trim().trim_start_matches('/'));
+                    match (key.modifiers, key.code) {
+                        // Shift+Tab: switch mode (crossterm sends BackTab for Shift+Tab)
+                        (_, KeyCode::BackTab) => {
+                            let old_mode = app_state.mode;
+                            let new_mode = app_state.switch_mode();
+                            app_state.prompt_builder.set_mode(new_mode);
+                            tracing::info!("mode switch: {} -> {}", old_mode, new_mode);
+                            ui_state.add_output(OutputLine::System(format!(
+                                "Switched to {} mode",
+                                new_mode
+                            )));
+                        }
+                        // Ctrl+C: quit
+                        (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
+                            tracing::info!("user requested quit (Ctrl+C)");
+                            if app_state.mode == AppMode::Auto {
+                                ui_state.add_output(OutputLine::System(
+                                    "Press Ctrl+C again to confirm quit from AUTO mode".into(),
+                                ));
+                                // Simple double-press: check next event
+                                if event::poll(Duration::from_secs(2))? {
+                                    if let Event::Key(k2) = event::read()? {
+                                        if k2.code == KeyCode::Char('c')
+                                            && k2.modifiers.contains(KeyModifiers::CONTROL)
+                                        {
+                                            break;
+                                        }
+                                    }
+                                }
+                            } else {
                                 break;
                             }
-
-                            // Handle slash commands (instant, no LLM call)
-                            let trimmed = input.trim();
-                            if trimmed == "/skills" {
-                                let skills = app_state.skills.list();
-                                if skills.is_empty() {
+                        }
+                        // Ctrl+Tab: toggle model thinking
+                        (KeyModifiers::CONTROL, KeyCode::Tab) => {
+                            app_state.think_enabled = !app_state.think_enabled;
+                            let state = if app_state.think_enabled {
+                                "THINK"
+                            } else {
+                                "DIRECT"
+                            };
+                            tracing::info!("think mode: {}", state);
+                            ui_state
+                                .add_output(OutputLine::System(format!("Model mode: {}", state)));
+                        }
+                        // Shift+Enter: insert newline
+                        (KeyModifiers::SHIFT, KeyCode::Enter) => {
+                            ui_state.push_char('\n');
+                        }
+                        // Enter: submit input or approve pending plan
+                        (KeyModifiers::NONE, KeyCode::Enter) => {
+                            // Plan approval: empty input + pending plan = approve
+                            if ui_state.input_text.is_empty() {
+                                if let Some(plan) = app_state.pending_plan.take() {
                                     ui_state
-                                        .add_output(OutputLine::System("No skills loaded.".into()));
-                                } else {
-                                    let mut lines = vec!["Available skills:".to_string()];
-                                    for s in skills {
-                                        lines.push(format!("  /{} — {}", s.name, s.description));
-                                    }
-                                    ui_state.add_output(OutputLine::System(lines.join("\n")));
+                                        .add_output(OutputLine::System("Executing plan...".into()));
+                                    ui_state.start_thinking();
+                                    app_state.is_processing = true;
+                                    spawn_execution_with_plan(
+                                        &app_state,
+                                        &ui_state.last_user_input,
+                                        &plan,
+                                        result_tx.clone(),
+                                    );
+                                    continue;
                                 }
-                            } else if trimmed == "/setup" {
-                                tracing::info!("running setup wizard");
-                                match wizard::run(
-                                    terminal,
-                                    app_state.config.clone(),
-                                    &app_state.workspace,
-                                ) {
-                                    Ok(new_config) => {
-                                        app_state.config = new_config;
+                            }
+
+                            let input = ui_state.take_input();
+                            if !input.is_empty() {
+                                app_state.input_history.push(input.clone());
+                                app_state.history_index = 0;
+                                tracing::info!("user input: {}", input.trim());
+                                tracing::debug!(
+                                    "conversation history: {} messages, queue: {}",
+                                    app_state.conversation_history.len(),
+                                    app_state.pending_queue.len()
+                                );
+                                ui_state.last_user_input = input.clone();
+
+                                if input.trim() == "/quit" || input.trim() == "/exit" {
+                                    tracing::info!(
+                                        "session ending via /{}",
+                                        input.trim().trim_start_matches('/')
+                                    );
+                                    break;
+                                }
+
+                                // Handle slash commands (instant, no LLM call)
+                                let trimmed = input.trim();
+                                if trimmed == "/skills" {
+                                    let skills = app_state.skills.list();
+                                    if skills.is_empty() {
                                         ui_state.add_output(OutputLine::System(
-                                            "Setup complete. Configuration updated.".into(),
+                                            "No skills loaded.".into(),
                                         ));
-                                    }
-                                    Err(e) => {
-                                        ui_state.add_output(OutputLine::Error(format!(
-                                            "Setup wizard failed: {}",
-                                            e
-                                        )));
-                                    }
-                                }
-                                let skills = app_state.skills.list();
-                                if skills.is_empty() {
-                                    ui_state
-                                        .add_output(OutputLine::System("No skills loaded.".into()));
-                                } else {
-                                    let mut lines = vec!["Available skills:".to_string()];
-                                    for s in skills {
-                                        lines.push(format!("  /{} — {}", s.name, s.description));
-                                    }
-                                    ui_state.add_output(OutputLine::System(lines.join("\n")));
-                                }
-                            } else if trimmed == "/apply" {
-                                // Apply file changes from the last assistant response
-                                tracing::info!("applying file changes, mode={}", app_state.mode);
-                                tracing::debug!("conversation history length: {} messages", app_state.conversation_history.len());
-                                let last_content =
-                                    ui_state.output_lines.iter().rev().find_map(|ol| match ol {
-                                        OutputLine::Assistant(t) => Some(t.clone()),
-                                        _ => None,
-                                    });
-                                if let Some(ref content) = last_content {
-                                    let changes = agent::AgentPipeline::parse_file_changes(content);
-                                    if changes.is_empty() {
-                                        ui_state.add_output(OutputLine::Error(
-                                            "No file changes found in the last response.".into(),
-                                        ));
-                                    } else if app_state.mode == AppMode::Edit {
-                                        // Edit mode: queue confirmations for y/n review
-                                        let sandbox =
-                                            sandbox::Sandbox::new(app_state.workspace.clone());
-                                        let file_ops = project::file_ops::FileOps::new(
-                                            &sandbox,
-                                            app_state.mode,
-                                        );
-                                        app_state.clear_pending();
-                                        let mut queued = 0;
-                                        for change in &changes {
-                                            let full_path = app_state.workspace.join(&change.path);
-                                            let fc = match if change.action == "delete" {
-                                                file_ops.prepare_delete(&full_path)
-                                            } else {
-                                                file_ops.prepare_write(&full_path, &change.content)
-                                            } {
-                                                Ok(fc) => fc,
-                                                Err(e) => {
-                                                    ui_state.add_output(OutputLine::Error(
-                                                        format!(
-                                                            "Blocked {}: {}",
-                                                            change.path.display(),
-                                                            e
-                                                        ),
-                                                    ));
-                                                    continue;
-                                                }
-                                            };
-
-                                            // Show diff preview
-                                            if !fc.diff_preview.is_empty() {
-                                                ui_state.add_output(OutputLine::System(format!(
-                                                    "--- {}",
-                                                    change.path.display()
-                                                )));
-                                                for line in fc.diff_preview.lines() {
-                                                    if line.starts_with('-')
-                                                        && !line.starts_with("---")
-                                                    {
-                                                        ui_state.add_output(OutputLine::Diff {
-                                                            added: vec![],
-                                                            removed: vec![line.to_string()],
-                                                        });
-                                                    } else if line.starts_with('+')
-                                                        && !line.starts_with("+++")
-                                                    {
-                                                        ui_state.add_output(OutputLine::Diff {
-                                                            added: vec![line.to_string()],
-                                                            removed: vec![],
-                                                        });
-                                                    }
-                                                }
-                                            }
-
-                                            let action = if change.action == "delete" {
-                                                app::PendingAction::DeleteFile { path: full_path }
-                                            } else {
-                                                app::PendingAction::WriteFile {
-                                                    path: full_path,
-                                                    content: change.content.clone(),
-                                                    diff_preview: fc.diff_preview,
-                                                }
-                                            };
-                                            app_state.push_pending(action);
-                                            queued += 1;
+                                    } else {
+                                        let mut lines = vec!["Available skills:".to_string()];
+                                        for s in skills {
+                                            lines
+                                                .push(format!("  /{} — {}", s.name, s.description));
                                         }
-                                        if queued > 0 {
-                                            app_state.awaiting_confirmation = true;
-                                            ui_state.add_output(OutputLine::System(format!(
-                                                "Review {} file(s). Press y/n/a (y=yes, n=no, a=apply all):",
-                                                queued
+                                        ui_state.add_output(OutputLine::System(lines.join("\n")));
+                                    }
+                                } else if trimmed == "/setup" {
+                                    tracing::info!("running setup wizard");
+                                    match wizard::run(
+                                        terminal,
+                                        app_state.config.clone(),
+                                        &app_state.workspace,
+                                    ) {
+                                        Ok(new_config) => {
+                                            app_state.config = new_config;
+                                            ui_state.add_output(OutputLine::System(
+                                                "Setup complete. Configuration updated.".into(),
+                                            ));
+                                        }
+                                        Err(e) => {
+                                            ui_state.add_output(OutputLine::Error(format!(
+                                                "Setup wizard failed: {}",
+                                                e
                                             )));
                                         }
+                                    }
+                                    let skills = app_state.skills.list();
+                                    if skills.is_empty() {
+                                        ui_state.add_output(OutputLine::System(
+                                            "No skills loaded.".into(),
+                                        ));
                                     } else {
-                                        // Auto mode: apply all immediately (Plan mode blocked by FileOps)
-                                        let sandbox =
-                                            sandbox::Sandbox::new(app_state.workspace.clone());
-                                        let file_ops = project::file_ops::FileOps::new(
-                                            &sandbox,
-                                            app_state.mode,
-                                        );
-                                        let mut applied = 0;
-                                        for change in &changes {
-                                            let full_path = app_state.workspace.join(&change.path);
-                                            let fc = match if change.action == "delete" {
-                                                file_ops.prepare_delete(&full_path)
-                                            } else {
-                                                file_ops.prepare_write(&full_path, &change.content)
-                                            } {
-                                                Ok(fc) => fc,
-                                                Err(e) => {
-                                                    ui_state.add_output(OutputLine::Error(
-                                                        format!(
-                                                            "Blocked {}: {}",
-                                                            change.path.display(),
-                                                            e
+                                        let mut lines = vec!["Available skills:".to_string()];
+                                        for s in skills {
+                                            lines
+                                                .push(format!("  /{} — {}", s.name, s.description));
+                                        }
+                                        ui_state.add_output(OutputLine::System(lines.join("\n")));
+                                    }
+                                } else if trimmed == "/recap" {
+                                    // Generate a recap of the current session
+                                    if !app_state.config.enable_recap {
+                                        ui_state.add_output(OutputLine::System(
+                                            "Recap is disabled in config.".into(),
+                                        ));
+                                    } else {
+                                        let history = app_state.conversation_history.clone();
+                                        let config = app_state.config.clone();
+                                        let tx = result_tx.clone();
+                                        ui_state.add_output(OutputLine::System(
+                                            "Generating recap...".into(),
+                                        ));
+                                        std::thread::spawn(move || {
+                                            let rt = tokio::runtime::Runtime::new().unwrap();
+                                            let result = rt.block_on(async {
+                                                let client = ollama::OllamaClient::new(&config)?;
+                                                recap::generate_recap(&client, &history, &config)
+                                                    .await
+                                            });
+                                            match result {
+                                                Ok(summary) => {
+                                                    let _ = tx.send(
+                                                        agent::retry::PipelineResult::Retry(
+                                                            agent::retry::RetryResult::Success {
+                                                                content: format!(
+                                                                    "Recap: {}",
+                                                                    summary
+                                                                ),
+                                                                attempts: 0,
+                                                            },
                                                         ),
-                                                    ));
-                                                    continue;
-                                                }
-                                            };
-                                            match file_ops.apply_change(&fc) {
-                                                Ok(()) => {
-                                                    ui_state.add_output(OutputLine::System(
-                                                        format!("Wrote {}", change.path.display()),
-                                                    ));
-                                                    applied += 1;
-                                                    run_syntax_check(
-                                                        &mut ui_state,
-                                                        &app_state.workspace.join(&change.path),
-                                                        &sandbox,
                                                     );
                                                 }
                                                 Err(e) => {
-                                                    ui_state.add_output(OutputLine::Error(
-                                                        format!(
-                                                            "Failed to write {}: {}",
-                                                            change.path.display(),
-                                                            e
+                                                    let _ = tx.send(
+                                                        agent::retry::PipelineResult::Retry(
+                                                            agent::retry::RetryResult::Failed {
+                                                                last_error: format!(
+                                                                    "Recap failed: {}",
+                                                                    e
+                                                                ),
+                                                                attempts: 0,
+                                                            },
                                                         ),
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    } // end enable_recap guard
+                                } else if trimmed == "/snapshots" || trimmed == "/snaps" {
+                                    match app_state.snapshot_manager.list(10) {
+                                        Ok(entries) => {
+                                            if entries.is_empty() {
+                                                ui_state.add_output(OutputLine::System(
+                                                    "No snapshots yet.".into(),
+                                                ));
+                                            } else {
+                                                let mut lines =
+                                                    vec!["Recent snapshots:".to_string()];
+                                                for (i, e) in entries.iter().enumerate() {
+                                                    lines.push(format!(
+                                                        "  {} {} {}",
+                                                        &e.hash[..8],
+                                                        e.date,
+                                                        e.message
                                                     ));
+                                                    if i >= 9 {
+                                                        break;
+                                                    }
+                                                }
+                                                lines.push(
+                                                    "Use /undo to restore last, /restore <hash> for specific"
+                                                        .into(),
+                                                );
+                                                ui_state.add_output(OutputLine::System(
+                                                    lines.join("\n"),
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            ui_state.add_output(OutputLine::Error(format!(
+                                                "Snapshot list failed: {}",
+                                                e
+                                            )));
+                                        }
+                                    }
+                                } else if trimmed == "/undo" {
+                                    match app_state.snapshot_manager.list(2) {
+                                        Ok(entries) => {
+                                            if entries.len() < 2 {
+                                                ui_state.add_output(OutputLine::Error(
+                                                    "No snapshot to undo to.".into(),
+                                                ));
+                                            } else {
+                                                let target = &entries[1];
+                                                match app_state
+                                                    .snapshot_manager
+                                                    .restore(&target.hash)
+                                                {
+                                                    Ok(()) => {
+                                                        ui_state.add_output(OutputLine::System(
+                                                            format!(
+                                                                "Restored to {} ({})",
+                                                                &target.hash[..8],
+                                                                target.message
+                                                            ),
+                                                        ));
+                                                    }
+                                                    Err(e) => {
+                                                        ui_state.add_output(OutputLine::Error(
+                                                            format!("Restore failed: {}", e),
+                                                        ));
+                                                    }
                                                 }
                                             }
                                         }
-                                        ui_state.add_output(OutputLine::System(format!(
-                                            "Applied {}/{} file(s)",
-                                            applied,
-                                            changes.len()
-                                        )));
+                                        Err(e) => {
+                                            ui_state.add_output(OutputLine::Error(format!(
+                                                "Snapshot access failed: {}",
+                                                e
+                                            )));
+                                        }
                                     }
-                                } else {
-                                    ui_state.add_output(OutputLine::Error(
-                                        "No assistant response to apply.".into(),
-                                    ));
-                                }
-                            } else if let Some(uv_args) = trimmed.strip_prefix("/uv ") {
-                                // /uv commands: init, venv, add <pkg>, run <script>
-                                handle_uv_command(&mut app_state, &mut ui_state, uv_args.trim());
-                            } else if trimmed == "/uv" {
-                                ui_state.add_output(OutputLine::System(
+                                } else if trimmed.starts_with("/restore ") {
+                                    let hash = trimmed.trim_start_matches("/restore ").trim();
+                                    if hash.is_empty() {
+                                        ui_state.add_output(OutputLine::Error(
+                                            "Usage: /restore <commit-hash>".into(),
+                                        ));
+                                    } else {
+                                        match app_state.snapshot_manager.restore(hash) {
+                                            Ok(()) => {
+                                                ui_state.add_output(OutputLine::System(format!(
+                                                    "Restored to {}",
+                                                    &hash[..hash.len().min(8)]
+                                                )));
+                                            }
+                                            Err(e) => {
+                                                ui_state.add_output(OutputLine::Error(format!(
+                                                    "Restore failed: {}",
+                                                    e
+                                                )));
+                                            }
+                                        }
+                                    }
+                                } else if trimmed == "/apply" {
+                                    // Apply file changes from the last assistant response
+                                    tracing::info!(
+                                        "applying file changes, mode={}",
+                                        app_state.mode
+                                    );
+                                    tracing::debug!(
+                                        "conversation history length: {} messages",
+                                        app_state.conversation_history.len()
+                                    );
+                                    let last_content = ui_state.output_lines.iter().rev().find_map(
+                                        |ol| match ol {
+                                            OutputLine::Assistant(t) => Some(t.clone()),
+                                            _ => None,
+                                        },
+                                    );
+                                    if let Some(ref content) = last_content {
+                                        let changes =
+                                            agent::AgentPipeline::parse_file_changes(content);
+                                        if changes.is_empty() {
+                                            ui_state.add_output(OutputLine::Error(
+                                                "No file changes found in the last response."
+                                                    .into(),
+                                            ));
+                                        } else if app_state.mode == AppMode::Edit {
+                                            // Edit mode: queue confirmations for y/n review
+                                            let sandbox =
+                                                sandbox::Sandbox::new(app_state.workspace.clone());
+                                            let file_ops = project::file_ops::FileOps::new(
+                                                &sandbox,
+                                                app_state.mode,
+                                            );
+                                            app_state.clear_pending();
+                                            let mut queued = 0;
+                                            for change in &changes {
+                                                let full_path =
+                                                    app_state.workspace.join(&change.path);
+                                                let fc = match if change.action == "delete" {
+                                                    file_ops.prepare_delete(&full_path)
+                                                } else {
+                                                    file_ops
+                                                        .prepare_write(&full_path, &change.content)
+                                                } {
+                                                    Ok(fc) => fc,
+                                                    Err(e) => {
+                                                        ui_state.add_output(OutputLine::Error(
+                                                            format!(
+                                                                "Blocked {}: {}",
+                                                                change.path.display(),
+                                                                e
+                                                            ),
+                                                        ));
+                                                        continue;
+                                                    }
+                                                };
+
+                                                // Show diff preview
+                                                if !fc.diff_preview.is_empty() {
+                                                    ui_state.add_output(OutputLine::System(
+                                                        format!("--- {}", change.path.display()),
+                                                    ));
+                                                    for line in fc.diff_preview.lines() {
+                                                        if line.starts_with('-')
+                                                            && !line.starts_with("---")
+                                                        {
+                                                            ui_state.add_output(OutputLine::Diff {
+                                                                added: vec![],
+                                                                removed: vec![line.to_string()],
+                                                            });
+                                                        } else if line.starts_with('+')
+                                                            && !line.starts_with("+++")
+                                                        {
+                                                            ui_state.add_output(OutputLine::Diff {
+                                                                added: vec![line.to_string()],
+                                                                removed: vec![],
+                                                            });
+                                                        }
+                                                    }
+                                                }
+
+                                                let action = if change.action == "delete" {
+                                                    app::PendingAction::DeleteFile {
+                                                        path: full_path,
+                                                    }
+                                                } else {
+                                                    app::PendingAction::WriteFile {
+                                                        path: full_path,
+                                                        content: change.content.clone(),
+                                                        diff_preview: fc.diff_preview,
+                                                    }
+                                                };
+                                                app_state.push_pending(action);
+                                                queued += 1;
+                                            }
+                                            if queued > 0 {
+                                                app_state.awaiting_confirmation = true;
+                                                ui_state.add_output(OutputLine::System(format!(
+                                                "Review {} file(s). Press y/n/a (y=yes, n=no, a=apply all):",
+                                                queued
+                                            )));
+                                            }
+                                        } else {
+                                            // Auto mode: apply all immediately (Plan mode blocked by FileOps)
+                                            let sandbox =
+                                                sandbox::Sandbox::new(app_state.workspace.clone());
+                                            let file_ops = project::file_ops::FileOps::new(
+                                                &sandbox,
+                                                app_state.mode,
+                                            );
+                                            let mut applied = 0;
+                                            for change in &changes {
+                                                let full_path =
+                                                    app_state.workspace.join(&change.path);
+                                                let fc = match if change.action == "delete" {
+                                                    file_ops.prepare_delete(&full_path)
+                                                } else {
+                                                    file_ops
+                                                        .prepare_write(&full_path, &change.content)
+                                                } {
+                                                    Ok(fc) => fc,
+                                                    Err(e) => {
+                                                        ui_state.add_output(OutputLine::Error(
+                                                            format!(
+                                                                "Blocked {}: {}",
+                                                                change.path.display(),
+                                                                e
+                                                            ),
+                                                        ));
+                                                        continue;
+                                                    }
+                                                };
+                                                match file_ops.apply_change(&fc) {
+                                                    Ok(()) => {
+                                                        ui_state.add_output(OutputLine::System(
+                                                            format!(
+                                                                "Wrote {}",
+                                                                change.path.display()
+                                                            ),
+                                                        ));
+                                                        applied += 1;
+                                                        run_syntax_check(
+                                                            &mut ui_state,
+                                                            &app_state.workspace.join(&change.path),
+                                                            &sandbox,
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        ui_state.add_output(OutputLine::Error(
+                                                            format!(
+                                                                "Failed to write {}: {}",
+                                                                change.path.display(),
+                                                                e
+                                                            ),
+                                                        ));
+                                                    }
+                                                }
+                                            }
+                                            ui_state.add_output(OutputLine::System(format!(
+                                                "Applied {}/{} file(s)",
+                                                applied,
+                                                changes.len()
+                                            )));
+                                        }
+                                    } else {
+                                        ui_state.add_output(OutputLine::Error(
+                                            "No assistant response to apply.".into(),
+                                        ));
+                                    }
+                                } else if let Some(uv_args) = trimmed.strip_prefix("/uv ") {
+                                    // /uv commands: init, venv, add <pkg>, run <script>
+                                    handle_uv_command(
+                                        &mut app_state,
+                                        &mut ui_state,
+                                        uv_args.trim(),
+                                    );
+                                } else if trimmed == "/uv" {
+                                    ui_state.add_output(OutputLine::System(
                                     "Usage: /uv init | /uv venv | /uv add <package> | /uv run <script>".into(),
                                 ));
-                            } else if let Some(run_cmd) = trimmed.strip_prefix("/run ") {
-                                handle_run_command(&mut app_state, &mut ui_state, run_cmd.trim());
-                            } else if let Some(cmd) = trimmed.strip_prefix('/') {
-                                let (skill_name, args) = match cmd.split_once(' ') {
-                                    Some((name, rest)) => (name, rest.trim()),
-                                    None => (cmd, ""),
-                                };
-
-                                if let Some(skill) = app_state.skills.get(skill_name).cloned() {
-                                    tracing::info!("skill: /{} {:?}", skill_name, args);
-                                    let full_input = if args.is_empty() {
-                                        String::new()
-                                    } else {
-                                        args.to_string()
+                                } else if let Some(run_cmd) = trimmed.strip_prefix("/run ") {
+                                    handle_run_command(
+                                        &mut app_state,
+                                        &mut ui_state,
+                                        run_cmd.trim(),
+                                    );
+                                } else if let Some(cmd) = trimmed.strip_prefix('/') {
+                                    let (skill_name, args) = match cmd.split_once(' ') {
+                                        Some((name, rest)) => (name, rest.trim()),
+                                        None => (cmd, ""),
                                     };
-                                    if app_state.is_processing {
-                                        // Queue skill invocation
-                                        let label = format!("/{} {}", skill_name, full_input)
-                                            .trim_end()
-                                            .to_string();
-                                        app_state.pending_queue.push(label.clone());
-                                        ui_state.add_output(OutputLine::Pending(label));
+
+                                    if let Some(skill) = app_state.skills.get(skill_name).cloned() {
+                                        tracing::info!("skill: /{} {:?}", skill_name, args);
+                                        let full_input = if args.is_empty() {
+                                            String::new()
+                                        } else {
+                                            args.to_string()
+                                        };
+                                        if app_state.is_processing {
+                                            // Queue skill invocation
+                                            let label = format!("/{} {}", skill_name, full_input)
+                                                .trim_end()
+                                                .to_string();
+                                            app_state.pending_queue.push(label.clone());
+                                            ui_state.add_output(OutputLine::Pending(label));
+                                        } else {
+                                            ui_state.add_output(OutputLine::User(input.clone()));
+                                            ui_state.start_thinking();
+                                            spawn_skill_request(
+                                                &app_state,
+                                                &ollama_client,
+                                                &skill,
+                                                &full_input,
+                                                result_tx.clone(),
+                                            );
+                                            app_state.is_processing = true;
+                                        }
                                     } else {
-                                        ui_state.add_output(OutputLine::User(input.clone()));
-                                        ui_state.start_thinking();
-                                        spawn_skill_request(
-                                            &app_state,
-                                            &ollama_client,
-                                            &skill,
-                                            &full_input,
-                                            result_tx.clone(),
-                                        );
-                                        app_state.is_processing = true;
-                                    }
-                                } else {
-                                    ui_state.add_output(OutputLine::Error(format!(
+                                        ui_state.add_output(OutputLine::Error(format!(
                                         "Unknown skill: /{}. Type /skills to see available skills.",
                                         skill_name
                                     )));
+                                    }
+                                } else if app_state.is_processing {
+                                    // Queue the message for later processing
+                                    app_state.pending_queue.push(input.clone());
+                                    ui_state.add_output(OutputLine::Pending(input));
+                                } else {
+                                    // Display user message immediately and spawn background request
+                                    ui_state.add_output(OutputLine::User(input.clone()));
+                                    // Record in conversation history
+                                    app_state.conversation_history.push(ConversationMessage {
+                                        role: "user".into(),
+                                        content: input.clone(),
+                                        tokens: util::text::estimate_tokens(&input),
+                                    });
+                                    // Record in session
+                                    app_state.current_session.add_message("user", &input);
+                                    ui_state.start_thinking();
+                                    spawn_request_for_mode(
+                                        &mut app_state,
+                                        &ollama_client,
+                                        &input,
+                                        result_tx.clone(),
+                                    );
+                                    app_state.is_processing = true;
                                 }
-                            } else if app_state.is_processing {
-                                // Queue the message for later processing
-                                app_state.pending_queue.push(input.clone());
-                                ui_state.add_output(OutputLine::Pending(input));
-                            } else {
-                                // Display user message immediately and spawn background request
-                                ui_state.add_output(OutputLine::User(input.clone()));
-                                // Record in conversation history
-                                app_state.conversation_history.push(ConversationMessage {
-                                    role: "user".into(),
-                                    content: input.clone(),
-                                    tokens: util::text::estimate_tokens(&input),
-                                });
-                                ui_state.start_thinking();
-                                spawn_request_for_mode(
-                                    &app_state,
-                                    &ollama_client,
-                                    &input,
-                                    result_tx.clone(),
-                                );
-                                app_state.is_processing = true;
                             }
                         }
-                    }
-                    // Backspace
-                    (KeyModifiers::NONE, KeyCode::Backspace) => {
-                        ui_state.backspace();
-                    }
-                    // Escape: cancel pending plan or scroll to bottom
-                    (KeyModifiers::NONE, KeyCode::Esc) => {
-                        if app_state.pending_plan.take().is_some() {
-                            ui_state.add_output(OutputLine::System("Plan cancelled.".into()));
-                        } else {
-                            ui_state.scroll_to_bottom();
+                        // Backspace
+                        (KeyModifiers::NONE, KeyCode::Backspace) => {
+                            ui_state.backspace();
                         }
-                    }
-                    // Page Up: scroll chat up
-                    (KeyModifiers::NONE, KeyCode::PageUp) => {
-                        ui_state.scroll_up(10);
-                    }
-                    // Page Down: scroll chat down
-                    (KeyModifiers::NONE, KeyCode::PageDown) => {
-                        ui_state.scroll_down(10);
-                    }
-                    // Character input (allow NONE or SHIFT for uppercase)
-                    (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
-                        app_state.history_index = 0;
-                        ui_state.push_char(c);
-                    }
-                    // Up arrow: navigate input history (older)
-                    (KeyModifiers::NONE, KeyCode::Up) => {
-                        if !app_state.input_history.is_empty() && app_state.history_index < app_state.input_history.len() {
-                            app_state.history_index += 1;
-                            let idx = app_state.input_history.len() - app_state.history_index;
-                            ui_state.input_text = app_state.input_history[idx].clone();
-                            ui_state.input_cursor = ui_state.input_text.chars().count();
-                        }
-                    }
-                    // Down arrow: navigate input history (newer)
-                    (KeyModifiers::NONE, KeyCode::Down) => {
-                        if app_state.history_index > 0 {
-                            app_state.history_index -= 1;
-                            if app_state.history_index == 0 {
-                                ui_state.input_text.clear();
-                                ui_state.input_cursor = 0;
+                        // Escape: cancel pending plan or scroll to bottom
+                        (KeyModifiers::NONE, KeyCode::Esc) => {
+                            if app_state.pending_plan.take().is_some() {
+                                ui_state.add_output(OutputLine::System("Plan cancelled.".into()));
                             } else {
+                                ui_state.scroll_to_bottom();
+                            }
+                        }
+                        // Page Up: scroll chat up
+                        (KeyModifiers::NONE, KeyCode::PageUp) => {
+                            ui_state.scroll_up(10);
+                        }
+                        // Page Down: scroll chat down
+                        (KeyModifiers::NONE, KeyCode::PageDown) => {
+                            ui_state.scroll_down(10);
+                        }
+                        // Character input (allow NONE or SHIFT for uppercase)
+                        (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
+                            app_state.history_index = 0;
+                            ui_state.push_char(c);
+                        }
+                        // Up arrow: navigate input history (older)
+                        (KeyModifiers::NONE, KeyCode::Up) => {
+                            if !app_state.input_history.is_empty()
+                                && app_state.history_index < app_state.input_history.len()
+                            {
+                                app_state.history_index += 1;
                                 let idx = app_state.input_history.len() - app_state.history_index;
                                 ui_state.input_text = app_state.input_history[idx].clone();
                                 ui_state.input_cursor = ui_state.input_text.chars().count();
                             }
                         }
+                        // Down arrow: navigate input history (newer)
+                        (KeyModifiers::NONE, KeyCode::Down) => {
+                            if app_state.history_index > 0 {
+                                app_state.history_index -= 1;
+                                if app_state.history_index == 0 {
+                                    ui_state.input_text.clear();
+                                    ui_state.input_cursor = 0;
+                                } else {
+                                    let idx =
+                                        app_state.input_history.len() - app_state.history_index;
+                                    ui_state.input_text = app_state.input_history[idx].clone();
+                                    ui_state.input_cursor = ui_state.input_text.chars().count();
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
                 }
                 _ => {}
             }
@@ -846,7 +1396,15 @@ fn spawn_llm_request(
     input: &str,
     tx: mpsc::Sender<agent::retry::PipelineResult>,
 ) {
-    let model = app_state.config.core_model.clone();
+    let model = if app_state.config.auto_model_routing {
+        match router::classify_request(input) {
+            router::ModelTier::Fast => app_state.config.effective_fast_model().to_string(),
+            router::ModelTier::Core => app_state.config.core_model.clone(),
+            router::ModelTier::Audit => app_state.config.effective_audit_model().to_string(),
+        }
+    } else {
+        app_state.config.core_model.clone()
+    };
     if model.is_empty() {
         let _ = tx.send(agent::retry::PipelineResult::Retry(
             agent::retry::RetryResult::Failed {
@@ -864,14 +1422,10 @@ fn spawn_llm_request(
     let input = input.to_string();
     let web_search_enabled = app_state.web_search_enabled;
     let max_search_tokens = app_state.config.max_search_context_tokens;
-    let max_file_lines = app_state.config.max_file_lines;
     let think = app_state.think_enabled;
-    let system_with_workspace = format!(
-        "{}\n\nWorking directory: {}\nCurrent date: {}",
-        apply_prompt_limits(agent::prompts::CODING_SYSTEM, max_file_lines),
-        app_state.workspace.display(),
-        current_datetime(),
-    );
+
+    // Build system prompt via PromptBuilder (already updated before calling this function)
+    let system_with_workspace = app_state.prompt_builder.build();
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
@@ -902,18 +1456,20 @@ fn spawn_llm_request(
         };
 
         // Build streaming request — use a client without overall deadline
-        let http = match ollama::OllamaClient::streaming_http_client(Duration::from_secs(connect_timeout)) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(agent::retry::PipelineResult::Retry(
-                    agent::retry::RetryResult::Failed {
-                        last_error: format!("Client error: {}", e),
-                        attempts: 0,
-                    },
-                ));
-                return;
-            }
-        };
+        let http =
+            match ollama::OllamaClient::streaming_http_client(Duration::from_secs(connect_timeout))
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx.send(agent::retry::PipelineResult::Retry(
+                        agent::retry::RetryResult::Failed {
+                            last_error: format!("Client error: {}", e),
+                            attempts: 0,
+                        },
+                    ));
+                    return;
+                }
+            };
         let messages = vec![
             ollama::chat::ChatMessage::system(&system_with_workspace),
             ollama::chat::ChatMessage::user(&user_message),
@@ -922,10 +1478,21 @@ fn spawn_llm_request(
 
         tracing::info!(
             "spawn_llm_streaming: model={}, think={}, context_window={}, web_search={}",
-            model, think, context_window_limit, web_search_enabled
+            model,
+            think,
+            context_window_limit,
+            web_search_enabled
         );
 
-        let stream = ollama::OllamaClient::chat_stream(http, endpoint, model, messages, think, context_window_limit, cancel_rx);
+        let stream = ollama::OllamaClient::chat_stream(
+            http,
+            endpoint,
+            model,
+            messages,
+            think,
+            context_window_limit,
+            cancel_rx,
+        );
 
         let mut pin = std::pin::pin!(stream);
 
@@ -943,7 +1510,10 @@ fn spawn_llm_request(
                         }
                         if chunk.done {
                             if chunk.done_reason.as_deref() == Some("length") {
-                                tracing::warn!("direct stream truncated (done_reason: length), {} bytes", full_content.len());
+                                tracing::warn!(
+                                    "direct stream truncated (done_reason: length), {} bytes",
+                                    full_content.len()
+                                );
                             }
                             break;
                         }
@@ -1062,16 +1632,17 @@ fn spawn_plan_then_execute(
             input
         );
         let messages = vec![
-            ollama::chat::ChatMessage::system(apply_prompt_limits(agent::prompts::QUICK_PLAN_SYSTEM, max_file_lines)),
+            ollama::chat::ChatMessage::system(apply_prompt_limits(
+                agent::prompts::QUICK_PLAN_SYSTEM,
+                max_file_lines,
+            )),
             ollama::chat::ChatMessage::user(&user_msg),
         ];
 
         match rt.block_on(bg_client.chat(&fast_model, messages, false)) {
             Ok(resp) => {
                 let plan = resp.content;
-                let _ = tx.send(agent::retry::PipelineResult::PlanReady {
-                    plan: plan.clone(),
-                });
+                let _ = tx.send(agent::retry::PipelineResult::PlanReady { plan: plan.clone() });
                 // In Plan mode, auto-continue to execution (read-only analysis)
                 if plan_mode {
                     // The main loop will handle this: Plan mode skips the approval gate
@@ -1114,9 +1685,10 @@ fn spawn_execution_with_plan(
     let history = app_state.conversation_history.clone();
     let workspace = app_state.workspace.clone();
     let context_window_limit = app_state.config.context_window_limit;
-    let max_file_lines = app_state.config.max_file_lines;
     let now = current_datetime();
-    let coding_system = apply_prompt_limits(agent::prompts::CODING_SYSTEM, max_file_lines);
+
+    // Build system prompt via PromptBuilder (already updated before calling this function)
+    let coding_system = app_state.prompt_builder.build();
 
     tracing::info!(
         "spawn_execution_with_plan: model={}, plan={} bytes, history_msgs={}, think={}, context_window={}",
@@ -1161,10 +1733,14 @@ fn spawn_execution_with_plan(
             .lines()
             .filter_map(|line| {
                 let trimmed = line.trim();
-                if trimmed.is_empty() { return None; }
+                if trimmed.is_empty() {
+                    return None;
+                }
                 // Match numbered steps: "1. ..." or "12) ..."
                 let rest = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
-                if rest.len() == trimmed.len() { return None; } // no leading digits
+                if rest.len() == trimmed.len() {
+                    return None;
+                } // no leading digits
                 rest.strip_prefix('.')
                     .or_else(|| rest.strip_prefix(')'))
                     .map(|s| s.trim().to_string())
@@ -1173,7 +1749,10 @@ fn spawn_execution_with_plan(
             .collect();
 
         if steps.is_empty() {
-            tracing::info!("no parseable steps in plan, executing as single request (plan: {} bytes)", plan.len());
+            tracing::info!(
+                "no parseable steps in plan, executing as single request (plan: {} bytes)",
+                plan.len()
+            );
             tracing::warn!("plan had no numbered steps — content:\n{}", plan);
             // No parseable steps — execute as a single request
             let output_budget = context_window_limit / 4;
@@ -1185,16 +1764,28 @@ fn spawn_execution_with_plan(
                 output_budget,
                 output_budget / 4,
             );
-            let messages = context::build_messages(
-                &system_prompt, &history, &input, Some(&plan), &core_model,
+            let messages =
+                context::build_messages(&system_prompt, &history, &input, Some(&plan), &core_model);
+            let content = stream_single_step(
+                &rt,
+                http,
+                &endpoint,
+                &model,
+                messages,
+                think,
+                context_window_limit,
+                &tx,
             );
-            let content = stream_single_step(&rt, http, &endpoint, &model, messages, think, context_window_limit, &tx);
             let _ = tx.send(agent::retry::PipelineResult::StreamDone { content });
             return;
         }
 
         let total_steps = steps.len();
-        tracing::info!("executing {} steps from plan ({} bytes)", total_steps, plan.len());
+        tracing::info!(
+            "executing {} steps from plan ({} bytes)",
+            total_steps,
+            plan.len()
+        );
         tracing::debug!("plan content: {}", plan);
         for (i, s) in steps.iter().enumerate() {
             tracing::info!("  step {}: {}", i + 1, s);
@@ -1235,32 +1826,40 @@ fn spawn_execution_with_plan(
 
             let user_msg = format!(
                 "Original request: {}\n\nPlan:\n{}\n{}Now execute ONLY step {} of {}: {}",
-                input,
-                plan,
-                prev_summary,
-                step_num,
-                total_steps,
-                step_desc,
+                input, plan, prev_summary, step_num, total_steps, step_desc,
             );
 
             // Build messages with history
-            let mut messages = context::build_messages(
-                &system_prompt, &history, &input, None, &core_model,
-            );
+            let mut messages =
+                context::build_messages(&system_prompt, &history, &input, None, &core_model);
             // Override the user message with the step-specific one
             if let Some(last) = messages.last_mut() {
                 last.content = user_msg;
             }
 
-            let step_content = stream_single_step(&rt, http.clone(), &endpoint, &model, messages, think, context_window_limit, &tx);
+            let step_content = stream_single_step(
+                &rt,
+                http.clone(),
+                &endpoint,
+                &model,
+                messages,
+                think,
+                context_window_limit,
+                &tx,
+            );
 
             tracing::info!(
                 "step {}/{} complete: {} bytes, {} lines",
-                step_num, total_steps,
+                step_num,
+                total_steps,
                 step_content.len(),
                 step_content.lines().count()
             );
-            tracing::debug!("step {} content (first 300 chars): {:.300}", step_num, step_content);
+            tracing::debug!(
+                "step {} content (first 300 chars): {:.300}",
+                step_num,
+                step_content
+            );
 
             if step_content.starts_with("ERROR:") {
                 let _ = tx.send(agent::retry::PipelineResult::Retry(
@@ -1283,7 +1882,9 @@ fn spawn_execution_with_plan(
             all_content.len(),
             all_content.lines().count()
         );
-        let _ = tx.send(agent::retry::PipelineResult::StreamDone { content: all_content });
+        let _ = tx.send(agent::retry::PipelineResult::StreamDone {
+            content: all_content,
+        });
     });
 }
 
@@ -1292,6 +1893,7 @@ fn spawn_execution_with_plan(
 /// Maximum number of auto-continuations when a response is truncated (done_reason: "length").
 const MAX_TRUNCATION_CONTINUATIONS: usize = 3;
 
+#[allow(clippy::too_many_arguments)]
 fn stream_single_step(
     rt: &tokio::runtime::Runtime,
     http: reqwest::Client,
@@ -1309,8 +1911,13 @@ fn stream_single_step(
     for attempt in 0..=MAX_TRUNCATION_CONTINUATIONS {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let stream = ollama::OllamaClient::chat_stream(
-            http.clone(), endpoint.to_string(), model.to_string(),
-            current_messages.clone(), think, num_ctx, cancel_rx,
+            http.clone(),
+            endpoint.to_string(),
+            model.to_string(),
+            current_messages.clone(),
+            think,
+            num_ctx,
+            cancel_rx,
         );
         let mut pin = std::pin::pin!(stream);
 
@@ -1353,7 +1960,11 @@ fn stream_single_step(
                     ));
                     continue;
                 }
-                tracing::info!("stream done: reason={}, {} bytes", reason, full_content.len());
+                tracing::info!(
+                    "stream done: reason={}, {} bytes",
+                    reason,
+                    full_content.len()
+                );
                 return full_content;
             }
             Err(e) => {
@@ -1362,7 +1973,10 @@ fn stream_single_step(
         }
     }
 
-    tracing::warn!("max continuations reached, returning {} bytes", full_content.len());
+    tracing::warn!(
+        "max continuations reached, returning {} bytes",
+        full_content.len()
+    );
     full_content
 }
 
@@ -1396,13 +2010,9 @@ fn spawn_skill_request(
         return;
     }
 
-    let system_prompt = format!(
-        "{}\n\nWorking directory: {}\nCurrent date: {}\n\n{}",
-        apply_prompt_limits(agent::prompts::CODING_SYSTEM, app_state.config.max_file_lines),
-        app_state.workspace.display(),
-        current_datetime(),
-        skill.content
-    );
+    // Build system prompt via PromptBuilder + skill content
+    let base_prompt = app_state.prompt_builder.build();
+    let system_prompt = format!("{}\n\n{}", base_prompt, skill.content);
     let max_retries = app_state.config.max_retries;
     let endpoint = app_state.config.ollama_endpoint.clone();
     let connect_timeout = app_state.config.connect_timeout;
@@ -1416,7 +2026,11 @@ fn spawn_skill_request(
 
     tracing::info!(
         "spawn_skill_request: skill={}, model={}, kind={:?}, max_retries={}, think={}",
-        skill.name, model, kind, max_retries, think
+        skill.name,
+        model,
+        kind,
+        max_retries,
+        think
     );
 
     std::thread::spawn(move || {
@@ -1501,9 +2115,17 @@ fn render_retry_result(ui_state: &mut ui::UiState, result: agent::retry::RetryRe
     // If the response contains file changes, present them for review
     let changes = agent::AgentPipeline::parse_file_changes(&content);
     if !changes.is_empty() {
-        tracing::info!("retry path: detected {} file change(s) in response", changes.len());
+        tracing::info!(
+            "retry path: detected {} file change(s) in response",
+            changes.len()
+        );
         for change in &changes {
-            tracing::debug!("  retry file: {} {} ({} bytes)", change.action, change.path.display(), change.content.len());
+            tracing::debug!(
+                "  retry file: {} {} ({} bytes)",
+                change.action,
+                change.path.display(),
+                change.content.len()
+            );
         }
         ui_state.add_output(OutputLine::System(format!(
             "Detected {} file change(s):",
@@ -1555,32 +2177,164 @@ fn render_retry_result(ui_state: &mut ui::UiState, result: agent::retry::RetryRe
 }
 
 /// Route request based on current mode:
-/// - Auto + code keywords → full auto pipeline (plan→implement→audit)
-/// - Edit/Auto (non-code) → plan-then-execute (plan step, then streaming execution)
-/// - Plan mode → plan-then-execute (plan shown as analysis, no approval)
-fn spawn_request_for_mode(
+///  - Auto + code keywords → full auto pipeline (plan→implement→audit)
+///  - Edit/Auto (non-code) → plan-then-execute (plan step, then streaming execution)
+///  - Plan mode → plan-then-execute (plan shown as analysis, no approval)
+///
+/// Spawn the tool-use agent loop on a background thread.
+/// The agent loop calls LLM with tool definitions, parses tool calls,
+/// executes tools, feeds results back, and repeats until done.
+fn spawn_agent_loop(
     app_state: &AppState,
+    input: &str,
+    tx: mpsc::Sender<agent::retry::PipelineResult>,
+) {
+    let model = app_state.config.core_model.clone();
+    if model.is_empty() {
+        let _ = tx.send(agent::retry::PipelineResult::Retry(
+            agent::retry::RetryResult::Failed {
+                last_error: "No core model configured.".into(),
+                attempts: 0,
+            },
+        ));
+        return;
+    }
+
+    let endpoint = app_state.config.ollama_endpoint.clone();
+    let connect_timeout = app_state.config.connect_timeout;
+    let workspace = app_state.workspace.clone();
+    let tool_config = app_state.config.clone();
+    let input = input.to_string();
+    let system_prompt = app_state.prompt_builder.build();
+    let config = agent::agent_loop::AgentLoopConfig::default();
+
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = tx.send(agent::retry::PipelineResult::Retry(
+                    agent::retry::RetryResult::Failed {
+                        last_error: format!("Runtime error: {}", e),
+                        attempts: 0,
+                    },
+                ));
+                return;
+            }
+        };
+
+        let bg_config = config::Config {
+            ollama_endpoint: endpoint,
+            connect_timeout,
+            ..config::Config::default()
+        };
+        let client = match ollama::OllamaClient::new(&bg_config) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(agent::retry::PipelineResult::Retry(
+                    agent::retry::RetryResult::Failed {
+                        last_error: format!("Client error: {}", e),
+                        attempts: 0,
+                    },
+                ));
+                return;
+            }
+        };
+
+        let tools = tools::ToolRegistry::new(workspace, &tool_config);
+
+        let tx_clone = tx.clone();
+        let result = rt.block_on(agent::agent_loop::run_agent_loop(
+            &client,
+            &model,
+            &tools,
+            &system_prompt,
+            &input,
+            &config,
+            |event| match event {
+                agent::agent_loop::AgentEvent::ToolStart { tool_name, call_id } => {
+                    let _ = tx_clone
+                        .send(agent::retry::PipelineResult::ToolStart { tool_name, call_id });
+                }
+                agent::agent_loop::AgentEvent::ToolResult { result } => {
+                    let _ = tx_clone.send(agent::retry::PipelineResult::ToolResultReady { result });
+                }
+                agent::agent_loop::AgentEvent::TextChunk { content } => {
+                    let _ = tx_clone.send(agent::retry::PipelineResult::StreamChunk { content });
+                }
+                agent::agent_loop::AgentEvent::Done { content, steps } => {
+                    tracing::info!("agent loop done: {} steps, {} bytes", steps, content.len());
+                    let _ = tx_clone.send(agent::retry::PipelineResult::StreamDone { content });
+                }
+                agent::agent_loop::AgentEvent::Error { message } => {
+                    tracing::error!("agent loop error: {}", message);
+                    let _ = tx_clone.send(agent::retry::PipelineResult::Retry(
+                        agent::retry::RetryResult::Failed {
+                            last_error: message,
+                            attempts: 0,
+                        },
+                    ));
+                }
+            },
+        ));
+
+        if let Err(e) = result {
+            tracing::error!("agent loop failed: {}", e);
+        }
+    });
+}
+
+fn spawn_request_for_mode(
+    app_state: &mut AppState,
     client: &ollama::OllamaClient,
     input: &str,
     tx: mpsc::Sender<agent::retry::PipelineResult>,
 ) {
+    // Pre-turn snapshot (non-fatal)
+    if let Err(e) = app_state.snapshot_manager.pre_turn(input) {
+        tracing::debug!("pre-turn snapshot skipped: {}", e);
+    }
+
+    // Emit structured event
+    app_state.event_sink.turn_started(
+        &app_state.config.core_model,
+        &app_state.mode.to_string(),
+        input.len(),
+    );
+
+    // Update PromptBuilder with current environment before spawning
+    app_state
+        .prompt_builder
+        .update_environment(prompt::EnvironmentBlock::capture(&app_state.workspace));
+    app_state.prompt_builder.set_volatile(
+        app_state.working_set.summary(),
+        app_state.conversation_summary.clone(),
+    );
+    // Set the current goal from user input — re-injected at prompt edges for small models
+    app_state.prompt_builder.set_current_goal(input);
+
     let is_code = looks_like_code_request(input);
     tracing::info!(
         "request routing: mode={}, is_code_request={}, pipeline={}",
         app_state.mode,
         is_code,
-        if app_state.mode == AppMode::Auto && is_code { "auto" } else { "plan_then_execute" }
+        if app_state.mode == AppMode::Auto && is_code {
+            "agent_loop"
+        } else {
+            "plan_then_execute"
+        }
     );
     tracing::debug!("input for routing: {:?}", input);
 
     if app_state.mode == AppMode::Auto && is_code {
-        spawn_auto_pipeline(app_state, input, tx);
+        // Use agent loop with tools for Auto mode code requests
+        spawn_agent_loop(app_state, input, tx);
     } else {
         spawn_plan_then_execute(app_state, client, input, tx);
     }
 }
 
 /// Spawn the full plan→implement→audit pipeline on a background thread.
+#[allow(dead_code)]
 fn spawn_auto_pipeline(
     app_state: &AppState,
     input: &str,
@@ -1601,7 +2355,11 @@ fn spawn_auto_pipeline(
 
     tracing::info!(
         "spawn_auto_pipeline: fast={}, core={}, audit={}, max_retries={}, web_search={}",
-        fast_model, core_model, audit_model, max_retries, web_search_enabled
+        fast_model,
+        core_model,
+        audit_model,
+        max_retries,
+        web_search_enabled
     );
 
     std::thread::spawn(move || {
@@ -1663,7 +2421,12 @@ fn spawn_auto_pipeline(
             Ok(changes) => {
                 tracing::info!("auto pipeline produced {} file change(s)", changes.len());
                 for c in &changes {
-                    tracing::info!("  auto: {} {} ({} bytes)", c.action, c.path.display(), c.content.len());
+                    tracing::info!(
+                        "  auto: {} {} ({} bytes)",
+                        c.action,
+                        c.path.display(),
+                        c.content.len()
+                    );
                 }
                 let applied: Vec<String> = changes
                     .iter()
@@ -1733,6 +2496,70 @@ fn current_datetime() -> String {
 }
 
 /// Replace {MAX_LINES} placeholder in prompts with the configured limit.
+/// Check if conversation summarization is needed and spawn a background task.
+fn maybe_trigger_summarization(
+    app_state: &AppState,
+    tx: mpsc::Sender<agent::retry::PipelineResult>,
+) {
+    let context_window = app_state.config.context_window_limit as usize;
+    if !agent::summarizer::needs_summarization(
+        &app_state.conversation_history,
+        context_window,
+        &app_state.summarizer_config,
+    ) {
+        return;
+    }
+
+    let fast_model = app_state.config.effective_fast_model().to_string();
+    if fast_model.is_empty() {
+        return;
+    }
+
+    let endpoint = app_state.config.ollama_endpoint.clone();
+    let connect_timeout = app_state.config.connect_timeout;
+    let history = app_state.conversation_history.clone();
+    let config = app_state.summarizer_config.clone();
+
+    tracing::info!("spawning background summarization task");
+    std::thread::spawn(move || {
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!("summarization runtime error: {}", e);
+                return;
+            }
+        };
+        let bg_config = config::Config {
+            ollama_endpoint: endpoint,
+            connect_timeout,
+            ..config::Config::default()
+        };
+        let client = match ollama::OllamaClient::new(&bg_config) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("summarization client error: {}", e);
+                return;
+            }
+        };
+        match rt.block_on(agent::summarizer::summarize(
+            &client,
+            &fast_model,
+            &history,
+            &config,
+        )) {
+            Ok(result) => {
+                let _ = tx.send(agent::retry::PipelineResult::SummaryReady {
+                    summary: result.summary,
+                    summarized_count: result.summarized_count,
+                });
+            }
+            Err(e) => {
+                tracing::warn!("summarization failed (non-fatal): {}", e);
+            }
+        }
+    });
+}
+
 fn apply_prompt_limits(prompt: &str, max_file_lines: usize) -> String {
     prompt.replace("{MAX_LINES}", &max_file_lines.to_string())
 }
@@ -1770,7 +2597,11 @@ fn handle_run_command(app_state: &mut AppState, ui_state: &mut ui::UiState, cmd:
     }
 
     tracing::info!("run: {} {}", bin, args.join(" "));
-    ui_state.add_output(OutputLine::System(format!("Running: {} {}", bin, args.join(" "))));
+    ui_state.add_output(OutputLine::System(format!(
+        "Running: {} {}",
+        bin,
+        args.join(" ")
+    )));
 
     let result = std::thread::scope(|s| {
         s.spawn(|| {
@@ -1784,13 +2615,23 @@ fn handle_run_command(app_state: &mut AppState, ui_state: &mut ui::UiState, cmd:
     match result {
         Some(output) => {
             if output.success {
-                tracing::info!("run success: {} {} (exit=0, stdout={} bytes)", bin, args.join(" "), output.stdout.len());
+                tracing::info!(
+                    "run success: {} {} (exit=0, stdout={} bytes)",
+                    bin,
+                    args.join(" "),
+                    output.stdout.len()
+                );
                 if !output.stdout.is_empty() {
                     ui_state.add_output(OutputLine::System(output.stdout.trim_end().to_string()));
                 }
                 ui_state.add_output(OutputLine::System("Done.".into()));
             } else {
-                tracing::warn!("run failed: {} {} (exit={:?})", bin, args.join(" "), output.exit_code);
+                tracing::warn!(
+                    "run failed: {} {} (exit={:?})",
+                    bin,
+                    args.join(" "),
+                    output.exit_code
+                );
                 ui_state.add_output(OutputLine::Error(format!(
                     "Exit {}: {}",
                     output.exit_code.unwrap_or(1),
@@ -1843,11 +2684,7 @@ fn parse_bash_blocks(content: &str) -> Vec<String> {
 }
 
 /// Execute bash blocks extracted from the LLM response.
-fn execute_bash_blocks(
-    app_state: &AppState,
-    ui_state: &mut ui::UiState,
-    content: &str,
-) {
+fn execute_bash_blocks(app_state: &AppState, ui_state: &mut ui::UiState, content: &str) {
     let blocks = parse_bash_blocks(content);
     if blocks.is_empty() {
         return;
@@ -2057,14 +2894,89 @@ fn handle_uv_command(app_state: &mut AppState, ui_state: &mut ui::UiState, args:
     }
 }
 
-/// Apply a single pending file action (from edit confirmation flow).
+/// Auto-save session to disk (non-blocking, logs errors but doesn't crash).
+fn auto_save_session(app_state: &AppState) {
+    if let Err(e) = session::persistence::save_session(&app_state.current_session) {
+        tracing::warn!("failed to auto-save session: {}", e);
+    }
+}
+
+/// Install a panic hook that writes crash dumps to ~/.litepilot/crashes/.
+fn install_crash_handler() {
+    let crashes_dir = config::Config::crashes_dir();
+    std::panic::set_hook(Box::new(move |info| {
+        if let Ok(dir) = crashes_dir.as_ref() {
+            let _ = std::fs::create_dir_all(dir);
+            let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+            let path = dir.join(format!("crash_{}.log", timestamp));
+            let payload = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let report = format!(
+                "LitePilot Crash Report\n\
+                 Time: {}\n\
+                 Location: {}\n\
+                 Message: {}\n",
+                chrono::Utc::now().to_rfc3339(),
+                location,
+                payload
+            );
+            let _ = std::fs::write(&path, &report);
+            eprintln!("Crash dump written to {}", path.display());
+        }
+    }));
+}
+
+fn pending_action_risk(action: &app::PendingAction) -> approval::RiskLevel {
+    match action {
+        app::PendingAction::DeleteFile { .. } => approval::RiskLevel::Destructive,
+        app::PendingAction::WriteFile { .. } => approval::RiskLevel::Write,
+        app::PendingAction::ExecuteCommand { cmd, args } => {
+            let arg_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            approval::classify_command(cmd, &arg_strs)
+        }
+    }
+}
+
+fn cache_approval_for_action(cache: &mut approval::ApprovalCache, action: &app::PendingAction) {
+    match action {
+        app::PendingAction::WriteFile { path, .. } => {
+            let sig = approval::ApprovalCache::file_signature("write", &path.display().to_string());
+            cache.approve(&sig);
+        }
+        app::PendingAction::DeleteFile { path } => {
+            let sig =
+                approval::ApprovalCache::file_signature("delete", &path.display().to_string());
+            cache.approve(&sig);
+        }
+        app::PendingAction::ExecuteCommand { cmd, args } => {
+            let arg_strs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            let sig = approval::ApprovalCache::command_signature(cmd, &arg_strs);
+            cache.approve(&sig);
+        }
+    }
+}
+
 /// Auto-apply all file changes (Auto mode — no confirmation needed).
 fn auto_apply_changes(
-    app_state: &AppState,
+    app_state: &mut AppState,
     ui_state: &mut ui::UiState,
     changes: &[agent::FileChange],
+    result_tx: &mpsc::Sender<agent::retry::PipelineResult>,
 ) {
-    tracing::info!("auto_apply_changes: {} file(s) to apply in {} mode", changes.len(), app_state.mode);
+    tracing::info!(
+        "auto_apply_changes: {} file(s) to apply in {} mode",
+        changes.len(),
+        app_state.mode
+    );
     let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
     let file_ops = project::file_ops::FileOps::new(&sandbox, app_state.mode);
 
@@ -2090,11 +3002,16 @@ fn auto_apply_changes(
             Ok(()) => {
                 ui_state.add_output(OutputLine::System(format!(
                     "{} {}",
-                    if change.action == "delete" { "Deleted" } else { "Wrote" },
+                    if change.action == "delete" {
+                        "Deleted"
+                    } else {
+                        "Wrote"
+                    },
                     change.path.display()
                 )));
                 if change.action != "delete" {
                     run_syntax_check(ui_state, &full_path, &sandbox);
+                    run_lsp_diagnostics(ui_state, &full_path, &app_state.workspace);
                 }
             }
             Err(e) => {
@@ -2107,6 +3024,25 @@ fn auto_apply_changes(
             }
         }
     }
+
+    // Run structured diagnostics on written files and send results
+    let written_paths: Vec<std::path::PathBuf> = changes
+        .iter()
+        .filter(|c| c.action != "delete")
+        .map(|c| app_state.workspace.join(&c.path))
+        .collect();
+
+    if !written_paths.is_empty() {
+        let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
+        let tx = result_tx.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(async {
+                agent::diagnostics::run_diagnostics(&written_paths, &sandbox).await
+            });
+            let _ = tx.send(agent::retry::PipelineResult::DiagnosticReady { result });
+        });
+    }
 }
 
 /// Enter file-by-file confirmation flow (Edit mode — y/n/a).
@@ -2115,18 +3051,73 @@ fn enter_file_confirmation(
     ui_state: &mut ui::UiState,
     changes: &[agent::FileChange],
 ) {
-    tracing::info!("enter_file_confirmation: {} file(s) for review", changes.len());
+    tracing::info!(
+        "enter_file_confirmation: {} file(s) for review",
+        changes.len()
+    );
     for change in changes {
-        tracing::debug!("  confirm: {} {} ({} bytes)", change.action, change.path.display(), change.content.len());
+        tracing::debug!(
+            "  confirm: {} {} ({} bytes)",
+            change.action,
+            change.path.display(),
+            change.content.len()
+        );
     }
     let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
     let file_ops = project::file_ops::FileOps::new(&sandbox, app_state.mode);
 
     app_state.clear_pending();
     let mut queued = 0;
+    let mut auto_approved = 0;
 
     for change in changes {
         let full_path = app_state.workspace.join(&change.path);
+        let path_str = change.path.display().to_string();
+
+        // Check approval cache — skip already-approved items
+        let sig = approval::ApprovalCache::file_signature(&change.action, &path_str);
+        if app_state.approval_cache.is_approved(&sig)
+            || app_state.approval_cache.is_action_approved(&change.action)
+        {
+            // Auto-apply this cached approval
+            let fc = match if change.action == "delete" {
+                file_ops.prepare_delete(&full_path)
+            } else {
+                file_ops.prepare_write(&full_path, &change.content)
+            } {
+                Ok(fc) => fc,
+                Err(e) => {
+                    ui_state.add_output(OutputLine::Error(format!("Blocked {}: {}", path_str, e)));
+                    continue;
+                }
+            };
+            match file_ops.apply_change(&fc) {
+                Ok(()) => {
+                    ui_state.add_output(OutputLine::System(format!(
+                        "[cached] {} {}",
+                        if change.action == "delete" {
+                            "Deleted"
+                        } else {
+                            "Wrote"
+                        },
+                        path_str
+                    )));
+                    if change.action != "delete" {
+                        run_syntax_check(ui_state, &full_path, &sandbox);
+                        run_lsp_diagnostics(ui_state, &full_path, &app_state.workspace);
+                    }
+                    auto_approved += 1;
+                }
+                Err(e) => {
+                    ui_state.add_output(OutputLine::Error(format!(
+                        "Failed to apply {}: {}",
+                        path_str, e
+                    )));
+                }
+            }
+            continue;
+        }
+
         let fc = match if change.action == "delete" {
             file_ops.prepare_delete(&full_path)
         } else {
@@ -2186,9 +3177,19 @@ fn enter_file_confirmation(
 
     if queued > 0 {
         app_state.awaiting_confirmation = true;
+        let extra = if auto_approved > 0 {
+            format!(" ({} auto-approved from cache)", auto_approved)
+        } else {
+            String::new()
+        };
         ui_state.add_output(OutputLine::System(format!(
-            "Apply {} file(s)? y/n/a (y=yes, n=no, a=apply all):",
-            queued
+            "Apply {} file(s)? y/n/a (y=yes, n=no, a=apply all):{}",
+            queued, extra
+        )));
+    } else if auto_approved > 0 {
+        ui_state.add_output(OutputLine::System(format!(
+            "All {} file(s) auto-approved from cache.",
+            auto_approved
         )));
     }
 }
@@ -2206,14 +3207,20 @@ fn apply_pending_action(
             ref content,
             diff_preview: _,
         } => {
-            tracing::info!("applying write: {} ({} bytes)", path.display(), content.len());
-            let fc = file_ops.prepare_write(&path, &content);
+            tracing::info!(
+                "applying write: {} ({} bytes)",
+                path.display(),
+                content.len()
+            );
+            let fc = file_ops.prepare_write(path, content);
             match fc {
                 Ok(fc) => match file_ops.apply_change(&fc) {
                     Ok(()) => {
                         ui_state
                             .add_output(OutputLine::System(format!("Wrote {}", path.display())));
-                        run_syntax_check(ui_state, &path, sandbox);
+                        run_syntax_check(ui_state, path, sandbox);
+                        // LSP diagnostics needs workspace, not available here directly
+                        // (apply_pending_action only has sandbox reference)
                     }
                     Err(e) => {
                         ui_state.add_output(OutputLine::Error(format!(
@@ -2234,7 +3241,7 @@ fn apply_pending_action(
         }
         app::PendingAction::DeleteFile { ref path } => {
             tracing::info!("applying delete: {}", path.display());
-            let fc = file_ops.prepare_delete(&path);
+            let fc = file_ops.prepare_delete(path);
             match fc {
                 Ok(fc) => match file_ops.apply_change(&fc) {
                     Ok(()) => {
@@ -2290,7 +3297,11 @@ fn run_syntax_check(
                 ui_state.add_output(OutputLine::System(format!("  Syntax OK: {}", path_display)));
             }
             agent::syntax::SyntaxResult::Fail { errors } => {
-                tracing::warn!("syntax check FAIL: {} — {}", path_display, errors.lines().take(3).collect::<Vec<_>>().join("; "));
+                tracing::warn!(
+                    "syntax check FAIL: {} — {}",
+                    path_display,
+                    errors.lines().take(3).collect::<Vec<_>>().join("; ")
+                );
                 ui_state.add_output(OutputLine::Error(format!(
                     "  Syntax error in {}:\n  {}",
                     path_display,
@@ -2303,6 +3314,50 @@ fn run_syntax_check(
                     reason
                 )));
             }
+        }
+    }
+}
+
+fn run_lsp_diagnostics(
+    ui_state: &mut ui::UiState,
+    full_path: &std::path::Path,
+    workspace: &std::path::Path,
+) {
+    let client = match lsp::LspClient::for_file(full_path) {
+        Some(c) => c,
+        None => return,
+    };
+    if !client.is_available() {
+        return;
+    }
+    let path_display = full_path.display().to_string();
+    let ws = workspace.to_path_buf();
+    let fp = full_path.to_path_buf();
+
+    let result = std::thread::scope(|s| s.spawn(|| client.diagnostics(&fp, &ws)).join().ok());
+
+    match result {
+        Some(Ok(diagnostics)) => {
+            if diagnostics.is_empty() {
+                tracing::debug!("LSP diagnostics clean: {}", path_display);
+            } else {
+                let errs: Vec<String> = diagnostics
+                    .iter()
+                    .take(5)
+                    .map(|d| format!("  L{} [{}]: {}", d.line, d.severity, d.message))
+                    .collect();
+                ui_state.add_output(OutputLine::System(format!(
+                    "LSP diagnostics for {}:\n{}",
+                    path_display,
+                    errs.join("\n")
+                )));
+            }
+        }
+        Some(Err(e)) => {
+            tracing::debug!("LSP diagnostics failed for {}: {}", path_display, e);
+        }
+        None => {
+            tracing::debug!("LSP diagnostics thread panicked for {}", path_display);
         }
     }
 }

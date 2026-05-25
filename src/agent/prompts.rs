@@ -22,6 +22,15 @@ Output format: numbered steps, one per line:
 #[allow(dead_code)]
 pub const COMPACT_SYSTEM: &str = r#"Summarize this conversation into key points: decisions made, files created/modified, important context. Keep it under 200 words."#;
 
+/// System prompt for recapping conversation context after summarization.
+/// Injected as a system message to give the model continuity after compaction.
+#[allow(dead_code)]
+pub const RECAP_SYSTEM: &str = r#"A summary of the earlier conversation is provided above. Use it as context for the user's ongoing request. Key details:
+- File paths and changes mentioned are real and should be treated as already applied
+- Errors described were resolved unless stated otherwise
+- The user's current request continues from this context
+Do NOT repeat or re-explain the summary — just use it naturally."#;
+
 #[allow(dead_code)]
 pub const PLANNING_SYSTEM: &str = r#"You are a project planning assistant. Given a user request and project context:
 1. Analyze the requirements
@@ -112,6 +121,67 @@ Given a numbered catalog and a user request, output ONLY the indices of the most
 Consider: language/framework match, task type, code patterns.
 Output format: numbers only, e.g. 1,4,7
 If no templates are relevant, output: none"#;
+
+/// Correction prompt injected when tool call parsing fails.
+/// Shows the model the correct format to help small models recover.
+#[allow(dead_code)]
+pub const TOOL_CORRECTION_PROMPT: &str = r#"Your tool call was not understood. Use one of these formats:
+
+JSON format (preferred):
+<tool_call name="tool_name">{"param": "value"}</tool_call}
+
+Text format (fallback):
+Call: tool_name(param="value")
+
+Available tools: read_file, write_file, edit_file, list_dir, exec_shell, web_search
+
+Examples:
+<tool_call name="read_file">{"path": "src/main.rs"}</tool_call}
+<tool_call name="write_file">{"path": "src/new.rs", "content": "fn main() {}"}</tool_call}
+<tool_call name="exec_shell">{"command": "cargo test"}</tool_call}
+Call: read_file(path="src/main.rs")
+
+Please try again with the correct format."#;
+
+/// Injected after repeated tool call failures to trigger reflexion.
+/// Asks the model to verbalize what went wrong before retrying.
+#[allow(dead_code)]
+pub const REFLEXION_PROMPT: &str = r#"You have failed to produce a valid tool call multiple times.
+Before trying again, think step by step:
+1. What format are you trying to use?
+2. What is going wrong with the formatting?
+3. How should you fix it?
+
+Then output your tool call using the correct format:
+<tool_call name="tool_name">{"param": "value"}</tool_call}
+
+Take a breath and be precise with brackets, quotes, and commas."#;
+
+/// Prompt for reranking template candidates by semantic relevance.
+#[allow(dead_code)]
+pub const RERANK_SYSTEM: &str = r#"You rank code templates by relevance to a coding task.
+Given a task description and numbered candidate templates, output ONLY the indices in order of relevance (best first).
+Consider: code patterns, architecture, framework match, and implementation approach.
+Output format: comma-separated indices, e.g. 3,1,5
+If none are relevant, output: none"#;
+
+/// Prompt injected when post-write diagnostics detect errors.
+/// Feeds actual compiler/linter output back so the model can do targeted fixes.
+#[allow(dead_code)]
+pub const DIAGNOSTIC_CORRECTION_PROMPT: &str = r#"The files you wrote have diagnostic errors. Review the errors below and output corrected versions.
+
+Rules:
+- Only fix the reported errors — do not rewrite unrelated code
+- Keep the same file paths and structure
+- Output the COMPLETE corrected file (not just the changed lines)
+- Use the standard format:
+### FILE: path/to/file
+### ACTION: modify
+```
+corrected content
+```
+
+If a file has no errors, do not output it again."#;
 
 #[cfg(test)]
 mod tests {

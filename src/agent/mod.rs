@@ -1,9 +1,13 @@
+pub mod agent_loop;
 pub mod auto_run;
+pub mod diagnostics;
 pub mod editor;
 pub mod planner;
 pub mod prompts;
 pub mod retry;
+pub mod summarizer;
 pub mod syntax;
+pub mod tools_parser;
 
 use crate::codebase::CodeBase;
 use crate::config::Config;
@@ -16,6 +20,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct Plan {
+    pub strategic_goal: String,
     pub analysis: String,
     pub steps: Vec<String>,
     pub files: Vec<String>,
@@ -129,8 +134,9 @@ impl<'a> AgentPipeline<'a> {
         let messages = vec![
             ChatMessage::system(prompts::CODING_SYSTEM),
             ChatMessage::user(format!(
-                "Project context:\n{}{}\n\nPlan:\n{}\n\nImplement all changes. For each file, output:\n### FILE: path/to/file\n### ACTION: create|modify|delete\n```\nfile content\n```\n",
+                "Project context:\n{}{}\n\n[STRATEGIC GOAL: {}]\n\nPlan:\n{}\n\nImplement all changes. For each file, output:\n### FILE: path/to/file\n### ACTION: create|modify|delete\n```\nfile content\n```\n",
                 context, code_base_section,
+                plan.strategic_goal,
                 plan.steps.join("\n")
             )),
         ];
@@ -158,7 +164,16 @@ impl<'a> AgentPipeline<'a> {
     }
 
     fn parse_plan(text: &str) -> Plan {
+        // Extract strategic goal from first non-empty line
+        let strategic_goal = text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
         Plan {
+            strategic_goal,
             analysis: text.to_string(),
             steps: text
                 .lines()
@@ -236,6 +251,54 @@ impl<'a> AgentPipeline<'a> {
     }
 }
 
+/// Detect if a response has drifted from the strategic goal.
+/// Uses keyword overlap heuristic: if the response shares fewer than
+/// MIN_OVERLAP keywords with the goal, it's likely drifted.
+#[allow(dead_code)]
+pub fn detect_drift(goal: &str, response: &str) -> bool {
+    const MIN_OVERLAP: usize = 2;
+    let stop_words: &[&str] = &[
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+        "do", "does", "did", "will", "would", "could", "should", "may", "might", "can", "shall",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as", "into", "through",
+        "during", "before", "after", "above", "below", "between", "out", "off", "over", "under",
+        "again", "further", "then", "once", "and", "but", "or", "nor", "not", "so", "yet", "both",
+        "either", "neither", "each", "every", "all", "any", "few", "more", "most", "other", "some",
+        "such", "no", "only", "own", "same", "than", "too", "very", "just", "because", "if",
+        "when", "where", "how", "what", "which", "who", "this", "that", "these", "those", "i",
+        "me", "my", "we", "our", "you", "your", "he", "him", "his", "she", "her", "it", "its",
+        "they", "them", "their",
+    ];
+
+    let goal_lower = goal.to_lowercase();
+    let goal_words: Vec<&str> = goal_lower
+        .split_whitespace()
+        .filter(|w| w.len() > 2 && !stop_words.contains(w))
+        .collect();
+
+    if goal_words.len() < 2 {
+        return false; // Goal too short to meaningfully check
+    }
+
+    let resp_lower = response.to_lowercase();
+    let overlap = goal_words
+        .iter()
+        .filter(|w| resp_lower.contains(*w))
+        .count();
+
+    overlap < MIN_OVERLAP
+}
+
+/// Build a drift warning message to inject when drift is detected.
+#[allow(dead_code)]
+pub fn drift_warning(goal: &str) -> String {
+    format!(
+        "WARNING: You appear to have drifted from the objective. Refocus on: {}\n\
+         Continue working toward this goal. Do not introduce unrelated changes.",
+        goal
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +355,33 @@ pub fn add(a: i32, b: i32) -> i32 { a + b }
     fn parse_empty_changes() {
         let changes = AgentPipeline::parse_file_changes("");
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn plan_extracts_strategic_goal() {
+        let text = "Build a REST API with authentication\n- Create routes\n- Add middleware";
+        let plan = AgentPipeline::parse_plan(text);
+        assert_eq!(plan.strategic_goal, "Build a REST API with authentication");
+    }
+
+    #[test]
+    fn detect_drift_when_unrelated() {
+        let goal = "Implement user authentication with JWT tokens";
+        let response = "I noticed the CSS colors are wrong. Let me fix the background gradient.";
+        assert!(detect_drift(goal, response));
+    }
+
+    #[test]
+    fn no_drift_when_on_topic() {
+        let goal = "Implement user authentication with JWT tokens";
+        let response = "I'll create the JWT token validation and user authentication middleware.";
+        assert!(!detect_drift(goal, response));
+    }
+
+    #[test]
+    fn drift_warning_contains_goal() {
+        let warning = drift_warning("Fix the login bug");
+        assert!(warning.contains("Fix the login bug"));
+        assert!(warning.contains("WARNING"));
     }
 }
