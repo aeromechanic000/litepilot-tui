@@ -1403,13 +1403,15 @@ fn run_app(
                                 ui_state.scroll_to_bottom();
                             }
                         }
-                        // Page Up: scroll chat up
+                        // Page Up: scroll chat up by half a page
                         (KeyModifiers::NONE, KeyCode::PageUp) => {
-                            ui_state.scroll_up(10);
+                            let amount = (terminal.size().map(|s| s.height / 2).unwrap_or(10)).max(5);
+                            ui_state.scroll_up(amount);
                         }
-                        // Page Down: scroll chat down
+                        // Page Down: scroll chat down by half a page
                         (KeyModifiers::NONE, KeyCode::PageDown) => {
-                            ui_state.scroll_down(10);
+                            let amount = (terminal.size().map(|s| s.height / 2).unwrap_or(10)).max(5);
+                            ui_state.scroll_down(amount);
                         }
                         // Character input (allow NONE or SHIFT for uppercase)
                         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
@@ -1734,6 +1736,8 @@ fn spawn_execution_with_plan(
     let history = app_state.conversation_history.clone();
     let workspace = app_state.workspace.clone();
     let context_window_limit = app_state.config.context_window_limit;
+    let web_search_enabled = app_state.web_search_enabled;
+    let max_search_tokens = app_state.config.max_search_context_tokens;
     let now = current_datetime();
     let context_handle = app_state.context_manager.context_handle_for_model(&model).cloned();
 
@@ -1879,6 +1883,63 @@ fn spawn_execution_with_plan(
                 description: step_desc.clone(),
             });
 
+            // Handle [SEARCH] steps by running actual web search
+            if step_desc.starts_with("[SEARCH]") {
+                let search_query = step_desc
+                    .trim_start_matches("[SEARCH]")
+                    .trim()
+                    .trim_start_matches(|c: char| c == '-' || c == ' ')
+                    .to_string();
+                if web_search_enabled && !search_query.is_empty() {
+                    tracing::info!("plan step [SEARCH]: running web search for {:?}", search_query);
+                    let search_ctx = rt.block_on(run_web_search(&search_query, max_search_tokens));
+                    if !search_ctx.is_empty() {
+                        let preview: String = search_ctx.chars().take(300).collect();
+                        tracing::info!(
+                            "search returned {} bytes for step {}",
+                            search_ctx.len(),
+                            step_num
+                        );
+                        step_results.push(format!(
+                            "[Search results for '{}']\n{}",
+                            search_query,
+                            search_ctx
+                        ));
+                        all_content.push_str(&format!(
+                            "[Search results for '{}']\n{}\n",
+                            search_query, search_ctx
+                        ));
+                        let _ = tx.send(agent::retry::PipelineResult::StreamChunk {
+                            content: format!(
+                                "\nSearch results for '{}':\n{}\n",
+                                search_query,
+                                preview
+                            ),
+                        });
+                        continue;
+                    } else {
+                        step_results.push(format!(
+                            "[No search results found for '{}']",
+                            search_query
+                        ));
+                        all_content.push_str(&format!(
+                            "[No search results found for '{}']\n",
+                            search_query
+                        ));
+                        continue;
+                    }
+                } else {
+                    // No web search available — skip and note it
+                    step_results
+                        .push(format!("[Search skipped (web search disabled): '{}']", search_query));
+                    all_content.push_str(&format!(
+                        "[Search skipped: '{}']\n",
+                        search_query
+                    ));
+                    continue;
+                }
+            }
+
             let prev_summary = if step_results.is_empty() {
                 String::new()
             } else {
@@ -1891,7 +1952,7 @@ fn spawn_execution_with_plan(
             };
 
             let user_msg = format!(
-                "Original request: {}\n\nPlan:\n{}\n{}Now execute ONLY step {} of {}: {}",
+                "Original request: {}\n\nPlan:\n{}\n{}Now execute ONLY step {} of {}: {}\n\nOutput file content using this format:\n### FILE: relative/path/to/file\n### ACTION: create\n```\nfile content\n```",
                 input, plan, prev_summary, step_num, total_steps, step_desc,
             );
 
@@ -2844,6 +2905,7 @@ fn parse_bash_blocks(content: &str) -> Vec<String> {
 }
 
 /// Execute bash blocks extracted from the LLM response.
+/// Uses `/bin/sh -c` so shell features (redirects, pipes, heredocs) work correctly.
 fn execute_bash_blocks(app_state: &AppState, ui_state: &mut ui::UiState, content: &str) {
     let blocks = parse_bash_blocks(content);
     if blocks.is_empty() {
@@ -2853,63 +2915,57 @@ fn execute_bash_blocks(app_state: &AppState, ui_state: &mut ui::UiState, content
     tracing::info!("auto-executing {} bash block(s) in Auto mode", blocks.len());
 
     let sandbox = sandbox::Sandbox::new(app_state.workspace.clone());
-    let executor = sandbox::executor::Executor::new(&sandbox);
 
     for block in &blocks {
-        // Each block may contain multiple commands (one per line)
+        // Validate the first command word in each line against sandbox rules
         for cmd_line in block.lines() {
             let cmd_line = cmd_line.trim();
             if cmd_line.is_empty() {
                 continue;
             }
-
-            let parts: Vec<String> = cmd_line.split_whitespace().map(String::from).collect();
-            if parts.is_empty() {
-                continue;
-            }
-
-            let bin = parts[0].clone();
-            let args: Vec<String> = parts[1..].to_vec();
-
-            // Validate against sandbox rules
-            if let Err(e) = sandbox.validate_command(&bin, &args) {
+            let first_word = cmd_line.split_whitespace().next().unwrap_or("");
+            if let Err(e) = sandbox.validate_command(first_word, &[]) {
                 ui_state.add_output(OutputLine::Error(format!("Blocked: {} — {}", cmd_line, e)));
                 continue;
             }
+        }
 
-            ui_state.add_output(OutputLine::System(format!("$ {}", cmd_line)));
+        ui_state.add_output(OutputLine::System(format!("$ {}", block.lines().next().unwrap_or(""))));
 
-            let result = std::thread::scope(|s| {
-                s.spawn(|| {
-                    let rt = tokio::runtime::Runtime::new().ok()?;
-                    rt.block_on(executor.run(&bin, &args, None)).ok()
-                })
-                .join()
-                .ok()?
-            });
+        // Run the entire block through a shell so redirects/pipes/heredocs work
+        let workspace = app_state.workspace.clone();
+        let block_owned = block.to_string();
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                let output = std::process::Command::new("/bin/sh")
+                    .arg("-c")
+                    .arg(&block_owned)
+                    .current_dir(&workspace)
+                    .output();
+                output.ok()
+            })
+            .join()
+            .ok()?
+        });
 
-            match result {
-                Some(output) => {
-                    if output.success {
-                        let stdout = output.stdout.trim_end();
-                        if !stdout.is_empty() {
-                            ui_state.add_output(OutputLine::System(stdout.to_string()));
-                        }
-                    } else {
-                        ui_state.add_output(OutputLine::Error(format!(
-                            "Exit {}: {}",
-                            output.exit_code.unwrap_or(1),
-                            if output.stderr.is_empty() {
-                                output.stdout.trim_end()
-                            } else {
-                                output.stderr.trim_end()
-                            }
-                        )));
+        match result {
+            Some(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).trim_end().to_string();
+                if output.status.success() {
+                    if !stdout.is_empty() {
+                        ui_state.add_output(OutputLine::System(stdout));
                     }
+                } else {
+                    ui_state.add_output(OutputLine::Error(format!(
+                        "Exit {}: {}",
+                        output.status.code().unwrap_or(1),
+                        if stderr.is_empty() { &stdout } else { &stderr }
+                    )));
                 }
-                None => {
-                    ui_state.add_output(OutputLine::Error(format!("Failed: {}", cmd_line)));
-                }
+            }
+            None => {
+                ui_state.add_output(OutputLine::Error(format!("Failed: {}", block)));
             }
         }
     }

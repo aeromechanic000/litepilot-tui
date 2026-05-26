@@ -457,16 +457,16 @@ fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) 
         })
         .collect();
 
-    let total_lines = lines.len() as u16;
+    // Use ratatui's Paragraph::line_count for exact visual line count after wrapping.
+    let output = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total_visual_lines = output.line_count(area.width) as u16;
     let visible_height = area.height;
-    let max_scroll = total_lines.saturating_sub(visible_height);
+    let max_scroll = total_visual_lines.saturating_sub(visible_height);
     if ui.scroll_offset > max_scroll {
         ui.scroll_offset = max_scroll;
     }
 
-    let output = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((ui.scroll_offset, 0));
+    let output = output.scroll((ui.scroll_offset, 0));
     f.render_widget(output, area);
 }
 

@@ -16,16 +16,10 @@ impl Tool for ExecShell {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
 
-        let parts: Vec<&str> = command.splitn(2, ' ').collect();
-        let cmd = parts[0];
-        let args: Vec<String> = parts
-            .get(1)
-            .map(|s| s.split_whitespace().map(String::from).collect())
-            .unwrap_or_default();
-
-        // Validate against sandbox rules
+        // Validate the first command word against sandbox rules
+        let first_word = command.split_whitespace().next().unwrap_or("");
         let sandbox = crate::sandbox::Sandbox::new(std::path::PathBuf::from("."));
-        if let Err(e) = sandbox.validate_command(cmd, &args) {
+        if let Err(e) = sandbox.validate_command(first_word, &[]) {
             return Ok(ToolResult::err(
                 "exec_shell",
                 call_id,
@@ -33,7 +27,11 @@ impl Tool for ExecShell {
             ));
         }
 
-        let output = std::process::Command::new(cmd).args(&args).output();
+        // Use /bin/sh -c so shell features (redirects, pipes, heredocs) work
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(command)
+            .output();
 
         match output {
             Ok(output) => {

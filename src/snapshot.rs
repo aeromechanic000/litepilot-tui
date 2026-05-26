@@ -174,23 +174,25 @@ impl SnapshotManager {
         cmd.env("GIT_COMMITTER_NAME", "litepilot");
         cmd.env("GIT_COMMITTER_EMAIL", "litepilot@local");
 
-        let status = cmd.status().with_context(|| "Failed to run git")?;
-        if !status.success() {
-            anyhow::bail!("git command failed: {:?} (exit {:?})", args, status.code());
+        let output = cmd.output().with_context(|| "Failed to run git")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git command failed: {:?} (exit {:?}): {}", args, output.status.code(), stderr.trim());
         }
         Ok(())
     }
 
     fn git_cmd_config(&self, key: &str, value: &str) -> Result<()> {
-        let status = Command::new("git")
+        let output = Command::new("git")
             .arg(format!("--git-dir={}", self.git_dir.display()))
             .arg("config")
             .arg(key)
             .arg(value)
-            .status()
+            .output()
             .with_context(|| "Failed to run git config")?;
-        if !status.success() {
-            anyhow::bail!("git config {} {} failed", key, value);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git config {} {} failed: {}", key, value, stderr.trim());
         }
         Ok(())
     }
