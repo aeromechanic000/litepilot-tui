@@ -314,6 +314,23 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
         ));
     }
 
+    // Context usage indicator
+    let core_model = &app.config.core_model;
+    let context_window = crate::ollama::model::estimate_context_window(core_model);
+    let usage_pct = app.context_manager.context_usage_percent(context_window);
+    let usage_color = if usage_pct >= 100.0 {
+        Color::Red
+    } else if usage_pct >= 80.0 {
+        theme.warning
+    } else {
+        theme.accent
+    };
+    line2_spans.push(Span::raw(" | "));
+    line2_spans.push(Span::styled(
+        format!("ctx:{:.0}%", usage_pct),
+        Style::default().fg(usage_color),
+    ));
+
     let line2 = Line::from(line2_spans);
 
     let status = Paragraph::new(vec![line1, line2]);

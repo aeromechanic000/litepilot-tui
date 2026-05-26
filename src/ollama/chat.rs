@@ -32,6 +32,7 @@ struct ChatOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ChatChunk {
     pub content: String,
     pub done: bool,
@@ -295,6 +296,250 @@ impl OllamaClient {
                                 return;
                             }
                             // Tolerate individual parse errors
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// /api/generate types — for KV cache context management
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+struct GenerateRequest {
+    model: String,
+    prompt: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context: Option<Vec<i64>>,
+    stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    system: Option<String>,
+    options: ChatOptions,
+}
+
+/// A streaming chunk from `/api/generate`.
+#[derive(Debug, Clone)]
+pub struct GenerateChunk {
+    pub response: String,
+    pub done: bool,
+    pub done_reason: Option<String>,
+    pub model: String,
+    /// Only present on the final chunk (done=true)
+    pub context: Option<Vec<i64>>,
+    /// Tokens re-computed (cache miss) — only on final chunk
+    pub prompt_eval_count: Option<usize>,
+    /// Tokens generated — only on final chunk
+    pub eval_count: Option<usize>,
+}
+
+/// A non-streaming response from `/api/generate`.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct GenerateResponse {
+    pub response: String,
+    pub model: String,
+    pub context: Vec<i64>,
+    pub prompt_eval_count: usize,
+    pub eval_count: usize,
+}
+
+impl OllamaClient {
+    /// Streaming generation via `/api/generate` with optional KV cache context handle.
+    ///
+    /// The `system_prompt` is passed in the `system` field and `prompt` contains the
+    /// concatenated conversation text. When `context_handle` is `Some`, Ollama will
+    /// attempt prefix matching against the cached KV tensors.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_stream(
+        http: reqwest::Client,
+        endpoint: String,
+        model: String,
+        system_prompt: Option<String>,
+        prompt: String,
+        context_handle: Option<Vec<i64>>,
+        num_ctx: u64,
+        cancel: watch::Receiver<bool>,
+    ) -> impl futures::Stream<Item = Result<GenerateChunk>> {
+        let url = format!("{}/api/generate", endpoint);
+        let body = GenerateRequest {
+            model: model.clone(),
+            prompt,
+            context: context_handle,
+            stream: true,
+            system: system_prompt,
+            options: ChatOptions {
+                num_ctx,
+                num_predict: -1,
+            },
+        };
+
+        async_stream::stream! {
+            let resp = match http.post(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(anyhow::anyhow!("Generate stream connect failed: {}", e));
+                    return;
+                }
+            };
+
+            if !resp.status().is_success() {
+                let status = resp.status();
+                yield Err(anyhow::anyhow!("Ollama generate stream error: {}", status));
+                return;
+            }
+
+            let mut stream = resp.bytes_stream();
+            let mut buffer = String::new();
+            let read_timeout = std::time::Duration::from_secs(300);
+
+            let mut total_bytes: usize = 0;
+            const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024;
+            let start = std::time::Instant::now();
+            const MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+            let mut error_count: usize = 0;
+            const MAX_ERRORS: usize = 5;
+
+            loop {
+                let cancelled = *cancel.borrow();
+                if cancelled {
+                    yield Ok(GenerateChunk {
+                        response: String::new(),
+                        done: true,
+                        done_reason: Some("cancel".into()),
+                        model: model.clone(),
+                        context: None,
+                        prompt_eval_count: None,
+                        eval_count: None,
+                    });
+                    return;
+                }
+
+                if start.elapsed() > MAX_DURATION {
+                    yield Err(anyhow::anyhow!(
+                        "Generate stream exceeded maximum duration (30 min)"
+                    ));
+                    return;
+                }
+
+                let chunk_result = match tokio::time::timeout(read_timeout, stream.next()).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => {
+                        yield Ok(GenerateChunk {
+                            response: String::new(),
+                            done: true,
+                            done_reason: Some("stream_end".into()),
+                            model: model.clone(),
+                            context: None,
+                            prompt_eval_count: None,
+                            eval_count: None,
+                        });
+                        return;
+                    }
+                    Err(_) => {
+                        yield Err(anyhow::anyhow!("Generate stream timed out (no data for 300s)"));
+                        return;
+                    }
+                };
+
+                let bytes = match chunk_result {
+                    Ok(b) => b,
+                    Err(_) => {
+                        error_count += 1;
+                        if error_count >= MAX_ERRORS {
+                            yield Err(anyhow::anyhow!(
+                                "Too many generate stream errors ({})",
+                                error_count
+                            ));
+                            return;
+                        }
+                        continue;
+                    }
+                };
+
+                total_bytes += bytes.len();
+                if total_bytes > MAX_CONTENT_BYTES {
+                    yield Err(anyhow::anyhow!(
+                        "Generate stream exceeded maximum content size (10 MB)"
+                    ));
+                    return;
+                }
+
+                buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                while let Some(pos) = buffer.find('\n') {
+                    let line = buffer[..pos].trim().to_string();
+                    buffer = buffer[pos + 1..].to_string();
+
+                    if line.is_empty() {
+                        continue;
+                    }
+
+                    match serde_json::from_str::<serde_json::Value>(&line) {
+                        Ok(val) => {
+                            let response = val.get("response")
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let done = val.get("done")
+                                .and_then(|d| d.as_bool())
+                                .unwrap_or(false);
+                            let done_reason = val.get("done_reason")
+                                .and_then(|d| d.as_str())
+                                .map(|s| s.to_string());
+                            let resp_model = val.get("model")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or(&model)
+                                .to_string();
+
+                            // Extract eval stats (present on final chunk)
+                            let context = if done {
+                                val.get("context")
+                                    .and_then(|c| c.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_i64())
+                                            .collect()
+                                    })
+                            } else {
+                                None
+                            };
+                            let prompt_eval_count = if done {
+                                val.get("prompt_eval_count").and_then(|v| v.as_u64()).map(|v| v as usize)
+                            } else {
+                                None
+                            };
+                            let eval_count = if done {
+                                val.get("eval_count").and_then(|v| v.as_u64()).map(|v| v as usize)
+                            } else {
+                                None
+                            };
+
+                            yield Ok(GenerateChunk {
+                                response,
+                                done,
+                                done_reason,
+                                model: resp_model,
+                                context,
+                                prompt_eval_count,
+                                eval_count,
+                            });
+
+                            if done {
+                                return;
+                            }
+                        }
+                        Err(e) => {
+                            error_count += 1;
+                            if error_count >= MAX_ERRORS {
+                                yield Err(anyhow::anyhow!(
+                                    "JSON parse error in generate: {} in line: {}",
+                                    e, line
+                                ));
+                                return;
+                            }
                         }
                     }
                 }

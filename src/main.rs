@@ -528,6 +528,60 @@ fn run_app(
                     }
                     ui_state.add_output(OutputLine::Separator);
                 }
+                agent::retry::PipelineResult::StreamMeta {
+                    context_handle,
+                    prompt_eval_count,
+                    eval_count,
+                    total_prompt_tokens,
+                    model,
+                } => {
+                    // Update context manager with KV cache metadata
+                    if let Some(ctx) = context_handle {
+                        app_state.context_manager.update_from_response(
+                            ctx,
+                            prompt_eval_count,
+                            eval_count,
+                            total_prompt_tokens,
+                            &model,
+                        );
+                    } else {
+                        app_state.context_manager.set_total_prompt_tokens(total_prompt_tokens);
+                    }
+
+                    let context_window =
+                        ollama::model::estimate_context_window(&model);
+
+                    // Display KV cache hit rate
+                    if let Some(rate) = app_state.context_manager.cache_hit_rate() {
+                        let cached = total_prompt_tokens
+                            .saturating_sub(prompt_eval_count.unwrap_or(0));
+                        let recomputed = prompt_eval_count.unwrap_or(0);
+                        let gen = eval_count.unwrap_or(0);
+                        ui_state.add_output(OutputLine::System(format!(
+                            "KV cache: {:.1}% hit ({} cached, {} recomputed, {} generated)",
+                            rate, cached, recomputed, gen
+                        )));
+                    }
+
+                    // Context overflow warnings
+                    let usage_pct =
+                        app_state.context_manager.context_usage_percent(context_window);
+                    if usage_pct >= 100.0 {
+                        ui_state.add_output(OutputLine::Error(format!(
+                            "Context OVERFLOW! {:.0}% of window used ({}/{} tokens). Use /clear to reset.",
+                            usage_pct,
+                            total_prompt_tokens,
+                            context_window
+                        )));
+                    } else if usage_pct >= 80.0 {
+                        ui_state.add_output(OutputLine::System(format!(
+                            "Context {:.0}% full ({}/{} tokens). Consider /clear to start fresh.",
+                            usage_pct,
+                            total_prompt_tokens,
+                            context_window
+                        )));
+                    }
+                }
                 agent::retry::PipelineResult::PlanReady { plan } => {
                     tracing::info!("plan ready: {} bytes", plan.len());
                     tracing::debug!("plan content:\n{}", plan);
@@ -884,7 +938,18 @@ fn run_app(
 
                                 // Handle slash commands (instant, no LLM call)
                                 let trimmed = input.trim();
-                                if trimmed == "/skills" {
+                                if trimmed == "/clear" {
+                                    app_state.context_manager.clear();
+                                    app_state.conversation_history.clear();
+                                    app_state.conversation_summary = None;
+                                    ui_state.clear_output();
+                                    ui_state.add_output(OutputLine::System(
+                                        "Context cleared. Starting fresh session.".into(),
+                                    ));
+                                    ui_state.add_output(OutputLine::System(
+                                        "Shift+Tab: mode | Enter: send | Shift+Enter: newline | Ctrl+Tab: think | Ctrl+C: quit | /skills: list skills".into(),
+                                    ));
+                                } else if trimmed == "/skills" {
                                     let skills = app_state.skills.list();
                                     if skills.is_empty() {
                                         ui_state.add_output(OutputLine::System(
@@ -1388,7 +1453,7 @@ fn run_app(
     Ok(())
 }
 
-/// Spawn a streaming chat request on a background thread (direct, no plan step).
+/// Spawn a streaming generate request on a background thread (direct, no plan step).
 #[allow(dead_code)]
 fn spawn_llm_request(
     app_state: &AppState,
@@ -1422,10 +1487,24 @@ fn spawn_llm_request(
     let input = input.to_string();
     let web_search_enabled = app_state.web_search_enabled;
     let max_search_tokens = app_state.config.max_search_context_tokens;
-    let think = app_state.think_enabled;
 
     // Build system prompt via PromptBuilder (already updated before calling this function)
     let system_with_workspace = app_state.prompt_builder.build();
+
+    // Build generate prompt from conversation history
+    let (history_system, history_prompt) =
+        build_generate_prompt(&app_state.conversation_history, &input);
+    let combined_system = if history_system.is_some() {
+        Some(format!(
+            "{}\n\n{}",
+            system_with_workspace,
+            history_system.unwrap_or_default()
+        ))
+    } else {
+        Some(system_with_workspace.clone())
+    };
+    let context_handle = app_state.context_manager.context_handle_for_model(&model).cloned();
+    let total_prompt_tokens = estimate_prompt_tokens(combined_system.as_deref(), &history_prompt);
 
     std::thread::spawn(move || {
         let rt = match tokio::runtime::Runtime::new() {
@@ -1442,7 +1521,7 @@ fn spawn_llm_request(
         };
 
         // Run web search if enabled
-        let user_message = if web_search_enabled {
+        let final_prompt = if web_search_enabled {
             let search_ctx = rt.block_on(run_web_search(&input, max_search_tokens));
             if !search_ctx.is_empty() {
                 let _ = tx.send(agent::retry::PipelineResult::SearchDone {
@@ -1450,9 +1529,13 @@ fn spawn_llm_request(
                     context: search_ctx.clone(),
                 });
             }
-            format!("{}\n{}", search_ctx, input)
+            if history_prompt.is_empty() {
+                format!("{}\n{}", search_ctx, input)
+            } else {
+                format!("{}\nuser: {}\n{}", history_prompt, search_ctx, input)
+            }
         } else {
-            input
+            history_prompt
         };
 
         // Build streaming request — use a client without overall deadline
@@ -1470,77 +1553,45 @@ fn spawn_llm_request(
                     return;
                 }
             };
-        let messages = vec![
-            ollama::chat::ChatMessage::system(&system_with_workspace),
-            ollama::chat::ChatMessage::user(&user_message),
-        ];
-        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         tracing::info!(
-            "spawn_llm_streaming: model={}, think={}, context_window={}, web_search={}",
+            "spawn_llm_generate: model={}, context_window={}, web_search={}, has_context_handle={}",
             model,
-            think,
             context_window_limit,
-            web_search_enabled
+            web_search_enabled,
+            context_handle.is_some()
         );
 
-        let stream = ollama::OllamaClient::chat_stream(
+        let step = stream_single_step_generate(
+            &rt,
             http,
-            endpoint,
-            model,
-            messages,
-            think,
+            &endpoint,
+            &model,
+            combined_system,
+            final_prompt,
+            context_handle,
             context_window_limit,
-            cancel_rx,
+            &tx,
         );
 
-        let mut pin = std::pin::pin!(stream);
-
-        let result_content: Result<String, String> = rt.block_on(async {
-            use futures::StreamExt;
-            let mut full_content = String::new();
-            while let Some(chunk_result) = pin.next().await {
-                match chunk_result {
-                    Ok(chunk) => {
-                        if !chunk.content.is_empty() {
-                            let _ = tx.send(agent::retry::PipelineResult::StreamChunk {
-                                content: chunk.content.clone(),
-                            });
-                            full_content.push_str(&chunk.content);
-                        }
-                        if chunk.done {
-                            if chunk.done_reason.as_deref() == Some("length") {
-                                tracing::warn!(
-                                    "direct stream truncated (done_reason: length), {} bytes",
-                                    full_content.len()
-                                );
-                            }
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        return Err(format!("Stream error: {}", e));
-                    }
-                }
-            }
-            Ok(full_content)
-        });
-
-        // Drop cancel sender to clean up
-        drop(cancel_tx);
-
-        match result_content {
-            Ok(content) => {
-                let _ = tx.send(agent::retry::PipelineResult::StreamDone { content });
-            }
-            Err(error) => {
-                let _ = tx.send(agent::retry::PipelineResult::Retry(
-                    agent::retry::RetryResult::Failed {
-                        last_error: error,
-                        attempts: 0,
-                    },
-                ));
-            }
+        if step.content.starts_with("ERROR:") {
+            let _ = tx.send(agent::retry::PipelineResult::Retry(
+                agent::retry::RetryResult::Failed {
+                    last_error: step.content,
+                    attempts: 0,
+                },
+            ));
+        } else {
+            let _ = tx.send(agent::retry::PipelineResult::StreamDone {
+                content: step.content,
+            });
+            let _ = tx.send(agent::retry::PipelineResult::StreamMeta {
+                context_handle: step.context_handle,
+                prompt_eval_count: step.prompt_eval_count,
+                eval_count: step.eval_count,
+                total_prompt_tokens,
+                model,
+            });
         }
     });
 }
@@ -1679,24 +1730,23 @@ fn spawn_execution_with_plan(
     let endpoint = app_state.config.ollama_endpoint.clone();
     let connect_timeout = app_state.config.connect_timeout;
     let input = input.to_string();
-    let think = app_state.think_enabled;
     let plan = plan.to_string();
-    let core_model = app_state.config.core_model.clone();
     let history = app_state.conversation_history.clone();
     let workspace = app_state.workspace.clone();
     let context_window_limit = app_state.config.context_window_limit;
     let now = current_datetime();
+    let context_handle = app_state.context_manager.context_handle_for_model(&model).cloned();
 
     // Build system prompt via PromptBuilder (already updated before calling this function)
     let coding_system = app_state.prompt_builder.build();
 
     tracing::info!(
-        "spawn_execution_with_plan: model={}, plan={} bytes, history_msgs={}, think={}, context_window={}",
+        "spawn_execution_with_plan: model={}, plan={} bytes, history_msgs={}, context_window={}, has_context_handle={}",
         model,
         plan.len(),
         history.len(),
-        think,
-        context_window_limit
+        context_window_limit,
+        context_handle.is_some()
     );
 
     std::thread::spawn(move || {
@@ -1736,11 +1786,10 @@ fn spawn_execution_with_plan(
                 if trimmed.is_empty() {
                     return None;
                 }
-                // Match numbered steps: "1. ..." or "12) ..."
                 let rest = trimmed.trim_start_matches(|c: char| c.is_ascii_digit());
                 if rest.len() == trimmed.len() {
                     return None;
-                } // no leading digits
+                }
                 rest.strip_prefix('.')
                     .or_else(|| rest.strip_prefix(')'))
                     .map(|s| s.trim().to_string())
@@ -1748,13 +1797,19 @@ fn spawn_execution_with_plan(
             })
             .collect();
 
+        // Build history prompt for /api/generate
+        let history_prompt = history
+            .iter()
+            .filter(|m| m.role != "system")
+            .map(|m| format!("{}: {}", m.role, m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         if steps.is_empty() {
             tracing::info!(
                 "no parseable steps in plan, executing as single request (plan: {} bytes)",
                 plan.len()
             );
-            tracing::warn!("plan had no numbered steps — content:\n{}", plan);
-            // No parseable steps — execute as a single request
             let output_budget = context_window_limit / 4;
             let system_prompt = format!(
                 "{}\n\nWorking directory: {}\nCurrent date: {}\nOutput limit: keep response under {} tokens ({} lines max). If the task is too large, output only the first part and note what remains.",
@@ -1764,19 +1819,34 @@ fn spawn_execution_with_plan(
                 output_budget,
                 output_budget / 4,
             );
-            let messages =
-                context::build_messages(&system_prompt, &history, &input, Some(&plan), &core_model);
-            let content = stream_single_step(
+            let prompt = if history_prompt.is_empty() {
+                format!("[Plan]\n{}\n\nuser: {}", plan, input)
+            } else {
+                format!("{}\n[Plan]\n{}\n\nuser: {}", history_prompt, plan, input)
+            };
+            let total_tokens = estimate_prompt_tokens(Some(&system_prompt), &prompt);
+
+            let step = stream_single_step_generate(
                 &rt,
                 http,
                 &endpoint,
                 &model,
-                messages,
-                think,
+                Some(system_prompt),
+                prompt,
+                context_handle,
                 context_window_limit,
                 &tx,
             );
-            let _ = tx.send(agent::retry::PipelineResult::StreamDone { content });
+            let _ = tx.send(agent::retry::PipelineResult::StreamDone {
+                content: step.content,
+            });
+            let _ = tx.send(agent::retry::PipelineResult::StreamMeta {
+                context_handle: step.context_handle,
+                prompt_eval_count: step.prompt_eval_count,
+                eval_count: step.eval_count,
+                total_prompt_tokens: total_tokens,
+                model,
+            });
             return;
         }
 
@@ -1786,10 +1856,6 @@ fn spawn_execution_with_plan(
             total_steps,
             plan.len()
         );
-        tracing::debug!("plan content: {}", plan);
-        for (i, s) in steps.iter().enumerate() {
-            tracing::info!("  step {}: {}", i + 1, s);
-        }
         let mut all_content = String::new();
         let mut step_results: Vec<String> = Vec::new();
         let per_step_budget = context_window_limit / (4 * total_steps.max(1) as u64);
@@ -1802,17 +1868,17 @@ fn spawn_execution_with_plan(
             per_step_budget / 4,
         );
 
+        let mut current_context = context_handle;
+
         for (i, step_desc) in steps.iter().enumerate() {
             let step_num = i + 1;
 
-            // Notify main loop which step is starting
             let _ = tx.send(agent::retry::PipelineResult::StepStart {
                 step: step_num,
                 total: total_steps,
                 description: step_desc.clone(),
             });
 
-            // Build per-step context: plan overview + previous results + current step
             let prev_summary = if step_results.is_empty() {
                 String::new()
             } else {
@@ -1829,21 +1895,20 @@ fn spawn_execution_with_plan(
                 input, plan, prev_summary, step_num, total_steps, step_desc,
             );
 
-            // Build messages with history
-            let mut messages =
-                context::build_messages(&system_prompt, &history, &input, None, &core_model);
-            // Override the user message with the step-specific one
-            if let Some(last) = messages.last_mut() {
-                last.content = user_msg;
-            }
+            let prompt = if history_prompt.is_empty() {
+                format!("user: {}", user_msg)
+            } else {
+                format!("{}\nuser: {}", history_prompt, user_msg)
+            };
 
-            let step_content = stream_single_step(
+            let step_result = stream_single_step_generate(
                 &rt,
                 http.clone(),
                 &endpoint,
                 &model,
-                messages,
-                think,
+                Some(system_prompt.clone()),
+                prompt,
+                current_context.clone(),
                 context_window_limit,
                 &tx,
             );
@@ -1852,29 +1917,38 @@ fn spawn_execution_with_plan(
                 "step {}/{} complete: {} bytes, {} lines",
                 step_num,
                 total_steps,
-                step_content.len(),
-                step_content.lines().count()
-            );
-            tracing::debug!(
-                "step {} content (first 300 chars): {:.300}",
-                step_num,
-                step_content
+                step_result.content.len(),
+                step_result.content.lines().count()
             );
 
-            if step_content.starts_with("ERROR:") {
+            if step_result.content.starts_with("ERROR:") {
                 let _ = tx.send(agent::retry::PipelineResult::Retry(
                     agent::retry::RetryResult::Failed {
-                        last_error: step_content,
+                        last_error: step_result.content,
                         attempts: step_num,
                     },
                 ));
                 return;
             }
 
-            all_content.push_str(&step_content);
+            // Carry the context handle forward for cache reuse between steps
+            if let Some(ctx) = &step_result.context_handle {
+                current_context = Some(ctx.clone());
+            }
+
+            all_content.push_str(&step_result.content);
             all_content.push('\n');
-            step_results.push(step_content);
+            step_results.push(step_result.content);
         }
+
+        // Send final StreamMeta with the last step's context handle
+        // We estimate total tokens from the last step's prompt
+        let last_prompt = if history_prompt.is_empty() {
+            format!("user: {}", input)
+        } else {
+            format!("{}\nuser: {}", history_prompt, input)
+        };
+        let total_tokens = estimate_prompt_tokens(Some(&system_prompt), &last_prompt);
 
         tracing::info!(
             "all {} steps complete: total {} bytes, {} lines",
@@ -1885,6 +1959,13 @@ fn spawn_execution_with_plan(
         let _ = tx.send(agent::retry::PipelineResult::StreamDone {
             content: all_content,
         });
+        let _ = tx.send(agent::retry::PipelineResult::StreamMeta {
+            context_handle: current_context,
+            prompt_eval_count: None, // per-step, not easily aggregated
+            eval_count: None,
+            total_prompt_tokens: total_tokens,
+            model,
+        });
     });
 }
 
@@ -1893,29 +1974,43 @@ fn spawn_execution_with_plan(
 /// Maximum number of auto-continuations when a response is truncated (done_reason: "length").
 const MAX_TRUNCATION_CONTINUATIONS: usize = 3;
 
+/// Result of a single streaming step, including KV cache metadata.
+struct StepResult {
+    content: String,
+    context_handle: Option<Vec<i64>>,
+    prompt_eval_count: Option<usize>,
+    eval_count: Option<usize>,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn stream_single_step(
+fn stream_single_step_generate(
     rt: &tokio::runtime::Runtime,
     http: reqwest::Client,
     endpoint: &str,
     model: &str,
-    messages: Vec<ollama::chat::ChatMessage>,
-    think: bool,
+    system_prompt: Option<String>,
+    prompt: String,
+    context_handle: Option<Vec<i64>>,
     num_ctx: u64,
     tx: &mpsc::Sender<agent::retry::PipelineResult>,
-) -> String {
+) -> StepResult {
     let tx = tx.clone();
     let mut full_content = String::new();
-    let mut current_messages = messages;
+    let mut current_prompt = prompt;
+    let mut current_context = context_handle;
+    let mut final_context_handle: Option<Vec<i64>> = None;
+    let mut final_prompt_eval_count: Option<usize> = None;
+    let mut final_eval_count: Option<usize> = None;
 
     for attempt in 0..=MAX_TRUNCATION_CONTINUATIONS {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        let stream = ollama::OllamaClient::chat_stream(
+        let stream = ollama::OllamaClient::generate_stream(
             http.clone(),
             endpoint.to_string(),
             model.to_string(),
-            current_messages.clone(),
-            think,
+            system_prompt.clone(),
+            current_prompt.clone(),
+            current_context.clone(),
             num_ctx,
             cancel_rx,
         );
@@ -1926,13 +2021,23 @@ fn stream_single_step(
             while let Some(chunk_result) = pin.next().await {
                 match chunk_result {
                     Ok(chunk) => {
-                        if !chunk.content.is_empty() {
+                        if !chunk.response.is_empty() {
                             let _ = tx.send(agent::retry::PipelineResult::StreamChunk {
-                                content: chunk.content.clone(),
+                                content: chunk.response.clone(),
                             });
-                            full_content.push_str(&chunk.content);
+                            full_content.push_str(&chunk.response);
                         }
                         if chunk.done {
+                            // Capture metadata from final chunk
+                            if let Some(ctx) = chunk.context {
+                                final_context_handle = Some(ctx);
+                            }
+                            if chunk.prompt_eval_count.is_some() {
+                                final_prompt_eval_count = chunk.prompt_eval_count;
+                            }
+                            if chunk.eval_count.is_some() {
+                                final_eval_count = chunk.eval_count;
+                            }
                             return Ok(chunk.done_reason);
                         }
                     }
@@ -1954,10 +2059,13 @@ fn stream_single_step(
                         "response truncated (done_reason: length), continuing (attempt {}/{}, {} bytes so far)",
                         attempt + 1, MAX_TRUNCATION_CONTINUATIONS, full_content.len()
                     );
-                    current_messages.push(ollama::chat::ChatMessage::assistant(&full_content));
-                    current_messages.push(ollama::chat::ChatMessage::user(
-                        "Your previous response was cut off due to length. Continue exactly from where you left off. Do not repeat what you already wrote.",
-                    ));
+                    // Extend the prompt with the truncated response + continuation request
+                    current_prompt = format!(
+                        "{}\nassistant: {}\nuser: Your previous response was cut off due to length. Continue exactly from where you left off. Do not repeat what you already wrote.",
+                        current_prompt, full_content
+                    );
+                    // Keep the context handle for cache reuse on continuation
+                    current_context = final_context_handle.clone();
                     continue;
                 }
                 tracing::info!(
@@ -1965,10 +2073,20 @@ fn stream_single_step(
                     reason,
                     full_content.len()
                 );
-                return full_content;
+                return StepResult {
+                    content: full_content,
+                    context_handle: final_context_handle,
+                    prompt_eval_count: final_prompt_eval_count,
+                    eval_count: final_eval_count,
+                };
             }
             Err(e) => {
-                return format!("ERROR: {}", e);
+                return StepResult {
+                    content: format!("ERROR: {}", e),
+                    context_handle: None,
+                    prompt_eval_count: None,
+                    eval_count: None,
+                };
             }
         }
     }
@@ -1977,7 +2095,49 @@ fn stream_single_step(
         "max continuations reached, returning {} bytes",
         full_content.len()
     );
-    full_content
+    StepResult {
+        content: full_content,
+        context_handle: final_context_handle,
+        prompt_eval_count: final_prompt_eval_count,
+        eval_count: final_eval_count,
+    }
+}
+
+/// Build a flat prompt string from conversation history for `/api/generate`.
+/// Extracts system messages and returns (system_prompt, user_prompt).
+fn build_generate_prompt(
+    history: &[ConversationMessage],
+    current_input: &str,
+) -> (Option<String>, String) {
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut conversation_parts: Vec<String> = Vec::new();
+
+    for msg in history {
+        if msg.role == "system" {
+            system_parts.push(msg.content.clone());
+        } else {
+            conversation_parts.push(format!("{}: {}", msg.role, msg.content));
+        }
+    }
+    conversation_parts.push(format!("user: {}", current_input));
+
+    let system = if system_parts.is_empty() {
+        None
+    } else {
+        Some(system_parts.join("\n\n"))
+    };
+    let prompt = conversation_parts.join("\n");
+
+    (system, prompt)
+}
+
+/// Estimate total tokens in a generate prompt.
+fn estimate_prompt_tokens(system: Option<&str>, prompt: &str) -> usize {
+    let mut total = util::text::estimate_tokens(prompt);
+    if let Some(sys) = system {
+        total += util::text::estimate_tokens(sys);
+    }
+    total
 }
 
 /// Spawn a skill-based request on a background thread.

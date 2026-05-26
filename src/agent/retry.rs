@@ -232,6 +232,14 @@ pub enum PipelineResult {
     StreamChunk { content: String },
     /// Streaming finished — contains the full accumulated content
     StreamDone { content: String },
+    /// KV cache metadata from a completed /api/generate stream
+    StreamMeta {
+        context_handle: Option<Vec<i64>>,
+        prompt_eval_count: Option<usize>,
+        eval_count: Option<usize>,
+        total_prompt_tokens: usize,
+        model: String,
+    },
     /// Plan step completed — awaiting user approval before execution
     PlanReady { plan: String },
     /// A plan step is starting (for multi-step execution)
