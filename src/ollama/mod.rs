@@ -30,10 +30,6 @@ impl ContextManager {
         }
     }
 
-    pub fn context_handle(&self) -> Option<&Vec<i64>> {
-        self.context_handle.as_ref()
-    }
-
     /// Get the context handle only if it was produced by the given model.
     /// Returns None if the handle is from a different model (incompatible cache).
     pub fn context_handle_for_model(&self, model: &str) -> Option<&Vec<i64>> {
@@ -287,7 +283,7 @@ mod tests {
     #[test]
     fn context_manager_new_has_no_handle() {
         let cm = ContextManager::new();
-        assert!(cm.context_handle().is_none());
+        assert!(cm.context_handle_for_model("any").is_none());
         assert!(cm.cache_hit_rate().is_none());
         assert_eq!(cm.context_usage_percent(4096), 0.0);
     }
@@ -296,7 +292,8 @@ mod tests {
     fn context_manager_update_and_hit_rate() {
         let mut cm = ContextManager::new();
         cm.update_from_response(vec![1, 2, 3], Some(64), Some(128), 1024, "test:7b");
-        assert!(cm.context_handle().is_some());
+        assert!(cm.context_handle_for_model("test:7b").is_some());
+        assert!(cm.context_handle_for_model("other:4b").is_none()); // model mismatch
         let rate = cm.cache_hit_rate().unwrap();
         assert!((rate - 93.75).abs() < 0.01); // (1024-64)/1024 * 100
     }
@@ -306,7 +303,7 @@ mod tests {
         let mut cm = ContextManager::new();
         cm.update_from_response(vec![1, 2, 3], Some(10), Some(50), 500, "test:7b");
         cm.clear();
-        assert!(cm.context_handle().is_none());
+        assert!(cm.context_handle_for_model("test:7b").is_none());
         assert!(cm.cache_hit_rate().is_none());
     }
 

@@ -31,15 +31,6 @@ struct ChatOptions {
     num_predict: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct ChatChunk {
-    pub content: String,
-    pub done: bool,
-    pub done_reason: Option<String>,
-    pub model: String,
-}
-
 #[derive(Debug, Clone)]
 pub struct ChatResponse {
     pub content: String,
@@ -138,170 +129,6 @@ impl OllamaClient {
             model: resp_model,
         })
     }
-
-    pub fn chat_stream(
-        http: reqwest::Client,
-        endpoint: String,
-        model: String,
-        messages: Vec<ChatMessage>,
-        think: bool,
-        num_ctx: u64,
-        cancel: watch::Receiver<bool>,
-    ) -> impl futures::Stream<Item = Result<ChatChunk>> {
-        let url = format!("{}/api/chat", endpoint);
-        let body = ChatRequest {
-            model: model.clone(),
-            messages,
-            stream: true,
-            think,
-            options: ChatOptions {
-                num_ctx,
-                num_predict: -1,
-            },
-            tools: vec![],
-        };
-
-        async_stream::stream! {
-            let resp = match http.post(&url).json(&body).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    yield Err(anyhow::anyhow!("Stream connect failed: {}", e));
-                    return;
-                }
-            };
-
-            if !resp.status().is_success() {
-                let status = resp.status();
-                yield Err(anyhow::anyhow!("Ollama stream error: {}", status));
-                return;
-            }
-
-            let mut stream = resp.bytes_stream();
-            let mut buffer = String::new();
-            let read_timeout = std::time::Duration::from_secs(300);
-
-            // Guardrails
-            let mut total_bytes: usize = 0;
-            const MAX_CONTENT_BYTES: usize = 10 * 1024 * 1024; // 10 MB
-            let start = std::time::Instant::now();
-            const MAX_DURATION: std::time::Duration = std::time::Duration::from_secs(30 * 60); // 30 min
-            let mut error_count: usize = 0;
-            const MAX_ERRORS: usize = 5;
-
-            loop {
-                let cancelled = *cancel.borrow();
-                if cancelled {
-                    yield Ok(ChatChunk {
-                        content: String::new(),
-                        done: true,
-                        done_reason: Some("cancel".into()),
-                        model: model.clone(),
-                    });
-                    return;
-                }
-
-                // Wall-clock timeout
-                if start.elapsed() > MAX_DURATION {
-                    yield Err(anyhow::anyhow!(
-                        "Stream exceeded maximum duration (30 min), stopping"
-                    ));
-                    return;
-                }
-
-                let chunk_result = match tokio::time::timeout(read_timeout, stream.next()).await {
-                    Ok(Some(result)) => result,
-                    Ok(None) => {
-                        yield Ok(ChatChunk {
-                            content: String::new(),
-                            done: true,
-                            done_reason: Some("stream_end".into()),
-                            model: model.clone(),
-                        });
-                        return;
-                    }
-                    Err(_) => {
-                        yield Err(anyhow::anyhow!("Stream timed out (no data for 300s)"));
-                        return;
-                    }
-                };
-
-                let bytes = match chunk_result {
-                    Ok(b) => b,
-                    Err(_) => {
-                        error_count += 1;
-                        if error_count >= MAX_ERRORS {
-                            yield Err(anyhow::anyhow!(
-                                "Too many stream errors ({})",
-                                error_count
-                            ));
-                            return;
-                        }
-                        // Tolerate individual errors up to the limit
-                        continue;
-                    }
-                };
-
-                // Content size guard
-                total_bytes += bytes.len();
-                if total_bytes > MAX_CONTENT_BYTES {
-                    yield Err(anyhow::anyhow!(
-                        "Stream exceeded maximum content size (10 MB), stopping"
-                    ));
-                    return;
-                }
-
-                buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                while let Some(pos) = buffer.find('\n') {
-                    let line = buffer[..pos].trim().to_string();
-                    buffer = buffer[pos + 1..].to_string();
-
-                    if line.is_empty() {
-                        continue;
-                    }
-
-                    match serde_json::from_str::<serde_json::Value>(&line) {
-                        Ok(val) => {
-                            let content = val.get("message")
-                                .and_then(|m| m.get("content"))
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let done = val.get("done")
-                                .and_then(|d| d.as_bool())
-                                .unwrap_or(false);
-                            let done_reason = val.get("done_reason")
-                                .and_then(|d| d.as_str())
-                                .map(|s| s.to_string());
-                            let resp_model = val.get("model")
-                                .and_then(|m| m.as_str())
-                                .unwrap_or(&model)
-                                .to_string();
-
-                            yield Ok(ChatChunk {
-                                content,
-                                done,
-                                done_reason,
-                                model: resp_model,
-                            });
-
-                            if done {
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            error_count += 1;
-                            if error_count >= MAX_ERRORS {
-                                yield Err(anyhow::anyhow!("JSON parse error: {} in line: {}", e, line));
-                                return;
-                            }
-                            // Tolerate individual parse errors
-                        }
-                    }
-                }
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +153,7 @@ pub struct GenerateChunk {
     pub response: String,
     pub done: bool,
     pub done_reason: Option<String>,
+    #[allow(dead_code)]
     pub model: String,
     /// Only present on the final chunk (done=true)
     pub context: Option<Vec<i64>>,
