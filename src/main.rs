@@ -227,7 +227,7 @@ fn run_app(
 
     // Welcome message
     ui_state.add_output(OutputLine::System(
-        "Welcome to LitePilot! Ollama-powered local coding agent.".into(),
+        "Welcome to LitePilot! Ollama-powered local AI assistant.".into(),
     ));
     ui_state.add_output(OutputLine::System(
         "Shift+Tab: mode | Enter: send | Shift+Enter: newline | Ctrl+Tab: think | Ctrl+C: quit | /skills: list skills".into(),
