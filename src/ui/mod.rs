@@ -1,11 +1,12 @@
 pub mod theme;
+pub mod inline;
 
 use crate::app::AppState;
 use crate::ui::theme::Theme;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use std::path::PathBuf;
 
@@ -13,14 +14,19 @@ pub struct UiState {
     pub theme: Theme,
     pub input_text: String,
     pub input_cursor: usize,
+    /// Output lines kept for session persistence (not rendered in viewport)
     pub output_lines: Vec<OutputLine>,
-    pub scroll_offset: u16,
-    pub auto_scroll: bool,
-    /// Accumulates streaming tokens into the last Assistant output line
+    /// Lines queued for insert_before() rendering above the viewport
+    pub pending_inline: Vec<OutputLine>,
+    /// Partial streaming line text rendered in the viewport activity row
+    pub streaming_partial: String,
+    /// Accumulates streaming tokens for assistant output
     pub streaming_buffer: String,
-    pub workspace_hint: PathBuf,
+    /// Whether the thinking indicator is active (rendered in viewport)
+    pub is_thinking: bool,
     /// Tick counter for animating the thinking indicator dots
     pub thinking_tick: u8,
+    pub workspace_hint: PathBuf,
     /// Stores full multi-line paste content; input_text shows the summary
     paste_buffer: Option<String>,
     /// Remembers the last user input for plan approval flow
@@ -43,6 +49,7 @@ pub enum OutputLine {
         added: Vec<String>,
         removed: Vec<String>,
     },
+    #[allow(dead_code)]
     Thinking(()),
     Pending(String),
     Plan(String),
@@ -56,11 +63,12 @@ impl Default for UiState {
             input_text: String::new(),
             input_cursor: 0,
             output_lines: Vec::new(),
-            scroll_offset: 0,
-            auto_scroll: true,
+            pending_inline: Vec::new(),
+            streaming_partial: String::new(),
             streaming_buffer: String::new(),
-            workspace_hint: PathBuf::new(),
+            is_thinking: false,
             thinking_tick: 0,
+            workspace_hint: PathBuf::new(),
             paste_buffer: None,
             last_user_input: String::new(),
         }
@@ -82,45 +90,46 @@ impl UiState {
 }
 
 impl UiState {
+    /// Add an output line. Queues it for insert_before() rendering and keeps
+    /// it in output_lines for session persistence.
     pub fn add_output(&mut self, line: OutputLine) {
-        self.output_lines.push(line);
-        if self.auto_scroll {
-            self.scroll_to_bottom();
+        // Don't render Thinking inline — it's shown in the viewport
+        if !matches!(line, OutputLine::Thinking(_)) {
+            self.pending_inline.push(line.clone());
         }
+        self.output_lines.push(line);
     }
 
-    /// Append a streaming chunk to the last Assistant output line.
-    /// Creates a new Assistant line if none exists or if the last isn't Assistant.
+    /// Append a streaming token chunk. Complete lines are flushed to
+    /// pending_inline; the partial remainder is shown in the viewport.
     pub fn append_stream_chunk(&mut self, chunk: &str) {
         self.streaming_buffer.push_str(chunk);
-        match self.output_lines.last_mut() {
-            Some(OutputLine::Assistant(existing)) => {
-                existing.push_str(chunk);
+
+        // Flush complete lines to pending_inline
+        while let Some(pos) = self.streaming_buffer.find('\n') {
+            let line: String = self.streaming_buffer[..pos].to_string();
+            self.streaming_buffer = self.streaming_buffer[pos + 1..].to_string();
+            if line.is_empty() {
+                continue;
             }
-            _ => {
-                self.output_lines
-                    .push(OutputLine::Assistant(chunk.to_string()));
-            }
+            self.pending_inline
+                .push(OutputLine::Assistant(line));
         }
-        if self.auto_scroll {
-            self.scroll_to_bottom();
-        }
+
+        // Update the partial line for viewport rendering
+        self.streaming_partial = self.streaming_buffer.clone();
     }
 
-    /// Add a Thinking indicator line below the last user message.
+    /// Show the thinking indicator in the viewport.
     pub fn start_thinking(&mut self) {
-        self.output_lines.push(OutputLine::Thinking(()));
+        self.is_thinking = true;
         self.thinking_tick = 0;
-        if self.auto_scroll {
-            self.scroll_to_bottom();
-        }
     }
 
-    /// Remove the last Thinking line (if present) before replacing with response.
-    /// Returns true if a Thinking line was removed.
+    /// Hide the thinking indicator. Returns true if thinking was active.
     pub fn stop_thinking(&mut self) -> bool {
-        if matches!(self.output_lines.last(), Some(OutputLine::Thinking(()))) {
-            self.output_lines.pop();
+        if self.is_thinking {
+            self.is_thinking = false;
             true
         } else {
             false
@@ -129,8 +138,13 @@ impl UiState {
 
     /// Finish streaming — finalizes the buffer. Returns the full content.
     pub fn finish_stream(&mut self) -> String {
+        // Flush any remaining partial line
+        if !self.streaming_partial.is_empty() {
+            self.pending_inline
+                .push(OutputLine::Assistant(self.streaming_partial.clone()));
+            self.streaming_partial.clear();
+        }
         let content = std::mem::take(&mut self.streaming_buffer);
-        // If streaming produced nothing, add an empty Assistant line
         if content.is_empty()
             && !self
                 .output_lines
@@ -145,7 +159,10 @@ impl UiState {
     #[allow(dead_code)]
     pub fn clear_output(&mut self) {
         self.output_lines.clear();
-        self.scroll_offset = 0;
+        self.pending_inline.clear();
+        self.streaming_partial.clear();
+        self.streaming_buffer.clear();
+        self.is_thinking = false;
     }
 
     pub fn push_char(&mut self, c: char) {
@@ -182,8 +199,7 @@ impl UiState {
         input
     }
 
-    /// Handle pasted text. Multi-line pastes show a summary in the input field
-    /// while storing the full content for submission.
+    /// Handle pasted text.
     pub fn set_paste(&mut self, text: String) {
         let line_count = text.lines().count();
         if line_count > 1 {
@@ -198,52 +214,25 @@ impl UiState {
             }
         }
     }
-
-    pub fn scroll_up(&mut self, amount: u16) {
-        self.auto_scroll = false;
-        self.scroll_offset = self.scroll_offset.saturating_sub(amount);
-    }
-
-    pub fn scroll_down(&mut self, amount: u16) {
-        self.scroll_offset = self.scroll_offset.saturating_add(amount);
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        self.auto_scroll = true;
-        // scroll_offset will be clamped during render
-        self.scroll_offset = u16::MAX;
-    }
 }
 
+/// Draw the 3-row inline viewport: activity | status | input.
 pub fn draw(f: &mut Frame, app: &AppState, ui: &mut UiState) {
-    let size = f.area();
+    let area = f.area();
+    let rows = split_rows(area, 3);
 
-    // Calculate dynamic input height: grows with content, capped at 40% of terminal
-    let input_content_lines = estimate_input_lines(&ui.input_text, size.width);
-    let max_input = (size.height / 5).clamp(4, 15); // 20% of terminal, min 4, max 15
-    let input_height = (input_content_lines + 1).max(3).min(max_input);
+    draw_activity_row(f, ui, rows[0]);
+    draw_compact_status(f, app, ui, rows[1]);
+    draw_input_row(f, ui, rows[2]);
+    set_input_cursor(f, ui, rows[2]);
+}
 
-    // Status bar is always 2 lines
-    let status_bar_height: u16 = 2;
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(status_bar_height), // status bar (wraps if needed)
-            Constraint::Min(5),                    // main area
-            Constraint::Length(input_height),      // input area
-        ])
-        .split(size);
-
-    draw_status_bar(f, app, ui, chunks[0]);
-    draw_main_area(f, app, ui, chunks[1]);
-
-    let visible_content_rows = chunks[2].height.saturating_sub(1) as usize; // -1 for border
-    let has_overflow = input_content_lines as usize > visible_content_rows;
-    draw_input_area(f, ui, chunks[2], has_overflow);
-
-    // Place visible cursor in the input area
-    set_input_cursor(f, ui, chunks[2]);
+fn split_rows(area: Rect, count: u16) -> Vec<Rect> {
+    let mut rows = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        rows.push(Rect::new(area.x, area.y + i, area.width, 1));
+    }
+    rows
 }
 
 fn think_mode_label(enabled: &bool) -> &'static str {
@@ -254,13 +243,11 @@ fn think_mode_label(enabled: &bool) -> &'static str {
     }
 }
 
-fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
+/// Row 0: compact status line with mode, context usage, workspace.
+fn draw_compact_status(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
     let theme = &ui.theme;
     let (mode_label, mode_color) = theme.mode_indicator(&app.mode);
     let think_label = think_mode_label(&app.think_enabled);
-    let fast = truncate_model_name(app.config.effective_fast_model(), 12);
-    let core = truncate_model_name(&app.config.core_model, 12);
-    let audit = truncate_model_name(app.config.effective_audit_model(), 12);
 
     let think_color = if app.think_enabled {
         theme.accent
@@ -268,53 +255,6 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
         theme.warning
     };
 
-    // Line 1: LitePilot | endpoint | models
-    let line1 = Line::from(vec![
-        Span::styled(
-            " LitePilot ",
-            Style::default()
-                .fg(theme.primary)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        Span::raw(&app.config.ollama_endpoint),
-        Span::raw(" | "),
-        Span::raw(format!("F:{}", fast)),
-        Span::raw(" "),
-        Span::raw(format!("C:{}", core)),
-        Span::raw(" "),
-        Span::raw(format!("A:{}", audit)),
-    ]);
-
-    // Line 2: mode | think | workspace
-    let mut line2_spans = vec![
-        Span::styled(
-            format!(" [{}] ", mode_label),
-            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("| "),
-        Span::styled(
-            format!("[{}]", think_label),
-            Style::default()
-                .fg(think_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        Span::raw(truncate_path(
-            &app.workspace.to_string_lossy(),
-            area.width as usize / 2,
-        )),
-    ];
-
-    if !app.pending_queue.is_empty() {
-        line2_spans.push(Span::raw(" | "));
-        line2_spans.push(Span::styled(
-            format!("({} queued)", app.pending_queue.len()),
-            Style::default().fg(theme.accent),
-        ));
-    }
-
-    // Context usage indicator
     let core_model = &app.config.core_model;
     let context_window = crate::ollama::model::estimate_context_window(core_model);
     let usage_pct = app.context_manager.context_usage_percent(context_window);
@@ -325,441 +265,125 @@ fn draw_status_bar(f: &mut Frame, app: &AppState, ui: &UiState, area: Rect) {
     } else {
         theme.accent
     };
-    line2_spans.push(Span::raw(" | "));
-    line2_spans.push(Span::styled(
-        format!("ctx:{:.0}%", usage_pct),
-        Style::default().fg(usage_color),
-    ));
 
-    let line2 = Line::from(line2_spans);
+    let mut spans = vec![
+        Span::styled(
+            format!("[{}]", mode_label),
+            Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("[{}]", think_label),
+            Style::default().fg(think_color),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("ctx:{:.0}%", usage_pct),
+            Style::default().fg(usage_color),
+        ),
+    ];
 
-    let status = Paragraph::new(vec![line1, line2]);
+    if !app.pending_queue.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!("({} queued)", app.pending_queue.len()),
+            Style::default().fg(theme.accent),
+        ));
+    }
+
+    // Workspace (right-aligned would be complex; just append with separator)
+    let ws = truncate_path(&app.workspace.to_string_lossy(), 30);
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(ws, Style::default().fg(Color::DarkGray)));
+
+    let status = Paragraph::new(Line::from(spans));
     f.render_widget(status, area);
 }
 
-fn draw_main_area(f: &mut Frame, _app: &AppState, ui: &mut UiState, area: Rect) {
+/// Row 1: streaming partial line or thinking indicator.
+fn draw_activity_row(f: &mut Frame, ui: &mut UiState, area: Rect) {
     let theme = &ui.theme;
 
-    // Animate thinking dots when a Thinking line is present
-    let has_thinking = ui
-        .output_lines
-        .iter()
-        .any(|ol| matches!(ol, OutputLine::Thinking(_)));
-    if has_thinking {
+    if ui.is_thinking {
         ui.thinking_tick = ui.thinking_tick.wrapping_add(1);
-    }
-    let tick = ui.thinking_tick;
-
-    // Main output panel
-    let lines: Vec<Line> = ui
-        .output_lines
-        .iter()
-        .flat_map(|ol| match ol {
-            OutputLine::User(text) => vec![Line::from(vec![
-                Span::styled(
-                    "\u{25b6} ", // ▶ RIGHT-POINTING TRIANGLE
-                    Style::default()
-                        .fg(theme.primary)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(text.clone(), Style::default().add_modifier(Modifier::BOLD)),
-            ])],
-            OutputLine::Assistant(text) => {
-                let mut rendered = render_markdown(text, theme);
-                if let Some(first) = rendered.first_mut() {
-                    // Prepend ● BLACK CIRCLE marker by rebuilding the line
-                    let old = std::mem::take(first);
-                    let marker = Span::styled(
-                        "\u{25cf} ", // ● BLACK CIRCLE
-                        Style::default(),
-                    );
-                    let mut new_spans = vec![marker];
-                    new_spans.extend(old.spans);
-                    *first = Line::from(new_spans);
-                }
-                rendered
-            }
-            OutputLine::System(text) => vec![Line::from(vec![
-                Span::styled(
-                    "\u{203b} ", // ※ REFERENCE MARK
-                    Style::default().fg(theme.accent),
-                ),
-                Span::styled(text.clone(), Style::default().fg(Color::Reset)),
-            ])],
-            OutputLine::Error(text) => vec![Line::from(vec![
-                Span::styled(
-                    "\u{2717} ", // ✗ BALLOT X
-                    Style::default()
-                        .fg(theme.warning)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(text.clone(), Style::default().fg(theme.warning)),
-            ])],
-            OutputLine::Code { language, code } => render_code_block(language, code, theme),
-            OutputLine::Thinking(_) => {
-                let dots = ".".repeat(((tick / 4) % 3 + 1) as usize);
-                vec![Line::from(Span::styled(
-                    format!("\u{2234} thinking{}", dots), // ∴ THEREFORE
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::ITALIC),
-                ))]
-            }
-            OutputLine::Pending(text) => vec![Line::from(vec![
-                Span::styled(
-                    "\u{25b8} ", // ▸ SMALL RIGHT-POINTING TRIANGLE
-                    Style::default().fg(theme.accent),
-                ),
-                Span::styled(
-                    format!("{} (queued)", text),
-                    Style::default().fg(theme.accent),
-                ),
-            ])],
-            OutputLine::Plan(plan) => {
-                let mut lines = vec![Line::from(Span::styled(
-                    "\u{25c6} Plan".to_string(), // ◆ BLACK DIAMOND
-                    Style::default()
-                        .fg(theme.primary)
-                        .add_modifier(Modifier::BOLD),
-                ))];
-                for step in plan.lines() {
-                    let trimmed = step.trim();
-                    if !trimmed.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {}", trimmed),
-                            Style::default().fg(Color::Reset),
-                        )));
-                    }
-                }
-                lines
-            }
-            OutputLine::Diff { added, removed } => render_diff(added, removed, theme),
-            OutputLine::Separator => vec![Line::from(vec![
-                Span::styled(
-                    "\u{2500}".repeat(20), // ────────
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    " done ",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::DIM),
-                ),
-                Span::styled(
-                    "\u{2500}".repeat(20),
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::DIM),
-                ),
-            ])],
-        })
-        .collect();
-
-    // Use ratatui's Paragraph::line_count for exact visual line count after wrapping.
-    let output = Paragraph::new(lines).wrap(Wrap { trim: false });
-    let total_visual_lines = output.line_count(area.width) as u16;
-    let visible_height = area.height;
-    let max_scroll = total_visual_lines.saturating_sub(visible_height);
-    if ui.scroll_offset > max_scroll {
-        ui.scroll_offset = max_scroll;
-    }
-
-    let output = output.scroll((ui.scroll_offset, 0));
-    f.render_widget(output, area);
-}
-
-/// Render assistant text with basic markdown formatting.
-fn render_markdown<'a>(text: &'a str, theme: &'a Theme) -> Vec<Line<'a>> {
-    text.lines()
-        .map(|line| {
-            let trimmed = line.trim();
-
-            // Headers
-            if trimmed.starts_with("### ") {
-                return Line::from(Span::styled(
-                    trimmed.to_string(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-            }
-            if trimmed.starts_with("## ") {
-                return Line::from(Span::styled(
-                    trimmed.to_string(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-            }
-            if trimmed.starts_with("# ") {
-                return Line::from(Span::styled(
-                    trimmed.to_string(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                ));
-            }
-
-            // Bullet points
-            if trimmed.starts_with("- ") || trimmed.starts_with("* ") || trimmed.starts_with("• ")
-            {
-                return Line::from(Span::raw(line.to_string()));
-            }
-
-            // Numbered lists
-            if let Some(rest) = trimmed
-                .strip_prefix("1. ")
-                .or_else(|| trimmed.strip_prefix("2. "))
-                .or_else(|| trimmed.strip_prefix("3. "))
-                .or_else(|| trimmed.strip_prefix("4. "))
-                .or_else(|| trimmed.strip_prefix("5. "))
-            {
-                let _ = rest;
-                return Line::from(Span::raw(line.to_string()));
-            }
-
-            // Inline code (simple: just color backtick-enclosed segments)
-            if line.contains('`') {
-                return render_inline_code(line, theme);
-            }
-
-            Line::raw(line.to_string())
-        })
-        .collect()
-}
-
-fn render_inline_code<'a>(line: &'a str, _theme: &'a Theme) -> Line<'a> {
-    let mut spans = Vec::new();
-    let mut in_code = false;
-    let mut current = String::new();
-
-    for ch in line.chars() {
-        if ch == '`' {
-            if !current.is_empty() {
-                let style = if in_code {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                spans.push(Span::styled(std::mem::take(&mut current), style));
-            }
-            in_code = !in_code;
-        } else {
-            current.push(ch);
-        }
-    }
-    if !current.is_empty() {
-        let style = if in_code {
-            Style::default().add_modifier(Modifier::BOLD)
-        } else {
+        let dots = ".".repeat(((ui.thinking_tick / 4) % 3 + 1) as usize);
+        let line = Line::from(Span::styled(
+            format!("\u{2234} thinking{}", dots), // ∴
             Style::default()
-        };
-        spans.push(Span::styled(current, style));
-    }
-
-    Line::from(spans)
-}
-
-/// Render a code block with syntax highlighting.
-fn render_code_block<'a>(language: &'a str, code: &str, theme: &'a Theme) -> Vec<Line<'a>> {
-    let mut lines = Vec::new();
-
-    // Header line
-    lines.push(Line::from(Span::styled(
-        format!("┌─ {} ─", language),
-        Style::default().fg(theme.accent),
-    )));
-
-    // Try syntect highlighting
-    let highlighted = highlight_code(code, language);
-
-    for line in highlighted {
-        lines.push(line);
-    }
-
-    // Footer
-    lines.push(Line::from(Span::styled(
-        "└─",
-        Style::default().fg(theme.accent),
-    )));
-
-    lines
-}
-
-fn highlight_code<'a>(code: &str, language: &str) -> Vec<Line<'a>> {
-    let ss = syntect::parsing::SyntaxSet::load_defaults_newlines();
-    let ts = syntect::highlighting::ThemeSet::load_defaults();
-    let theme = &ts.themes["base16-eighties.dark"];
-
-    let syntax = ss
-        .find_syntax_by_token(language)
-        .or_else(|| ss.find_syntax_by_extension(language))
-        .unwrap_or_else(|| ss.find_syntax_plain_text());
-
-    let mut rng = syntect::easy::HighlightLines::new(syntax, theme);
-    let mut result = Vec::new();
-
-    for line in syntect::util::LinesWithEndings::from(code) {
-        let ranges: Vec<(syntect::highlighting::Style, &str)> =
-            rng.highlight_line(line, &ss).unwrap_or_default();
-        let spans: Vec<Span> = ranges
-            .iter()
-            .map(|(style, text): &(_, _)| {
-                let color = Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-                let mut modifiers = Modifier::empty();
-                if style
-                    .font_style
-                    .contains(syntect::highlighting::FontStyle::BOLD)
-                {
-                    modifiers |= Modifier::BOLD;
-                }
-                if style
-                    .font_style
-                    .contains(syntect::highlighting::FontStyle::ITALIC)
-                {
-                    modifiers |= Modifier::ITALIC;
-                }
-                Span::styled(
-                    text.to_string(),
-                    Style::default().fg(color).add_modifier(modifiers),
-                )
-            })
-            .collect();
-        result.push(Line::from(spans));
-    }
-
-    result
-}
-
-/// Render diff with colored +/- lines.
-fn render_diff<'a>(added: &[String], removed: &[String], _theme: &'a Theme) -> Vec<Line<'a>> {
-    let mut lines = Vec::new();
-    for r in removed {
-        lines.push(Line::from(Span::styled(
-            format!("- {}", r),
-            Style::default().fg(Color::Red),
-        )));
-    }
-    for a in added {
-        lines.push(Line::from(Span::styled(
-            format!("+ {}", a),
-            Style::default().fg(Color::Green),
-        )));
-    }
-    lines
-}
-
-fn draw_input_area(f: &mut Frame, ui: &UiState, area: Rect, has_overflow: bool) {
-    let theme = &ui.theme;
-    let text_width = area.width.saturating_sub(3) as usize; // " > " takes 3 cols
-    let visible_rows = area.height.saturating_sub(1) as usize; // -1 for border
-
-    let wrapped = wrap_input_text(&ui.input_text, text_width);
-
-    let mut para_lines: Vec<Line> = Vec::new();
-
-    // Determine how many lines we can actually show
-    let show_count = if has_overflow {
-        visible_rows.saturating_sub(1) // reserve last row for overflow indicator
+                .fg(theme.accent)
+                .add_modifier(Modifier::ITALIC),
+        ));
+        let para = Paragraph::new(line);
+        f.render_widget(para, area);
+    } else if !ui.streaming_partial.is_empty() {
+        let line = Line::from(vec![
+            Span::styled("\u{25cf} ", Style::default()), // ●
+            Span::raw(ui.streaming_partial.clone()),
+        ]);
+        let para = Paragraph::new(line);
+        f.render_widget(para, area);
     } else {
-        wrapped.len()
+        // Separator line
+        let line = Line::from(Span::styled(
+            "\u{2500}".repeat(area.width as usize), // ────
+            Style::default().fg(Color::DarkGray),
+        ));
+        let para = Paragraph::new(line);
+        f.render_widget(para, area);
+    }
+}
+
+/// Row 2: input prompt.
+fn draw_input_row(f: &mut Frame, ui: &UiState, area: Rect) {
+    let theme = &ui.theme;
+    let text_width = area.width.saturating_sub(3) as usize;
+
+    // Truncate input display to fit
+    let display_text = if ui.input_text.chars().count() > text_width {
+        let chars: Vec<char> = ui.input_text.chars().collect();
+        let start = chars.len().saturating_sub(text_width);
+        chars[start..].iter().collect()
+    } else {
+        ui.input_text.clone()
     };
 
-    for (i, chunk) in wrapped.iter().enumerate() {
-        if i >= show_count {
-            break;
-        }
-        if i == 0 {
-            para_lines.push(Line::from(vec![
-                Span::styled(" > ", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(chunk.clone()),
-            ]));
-        } else {
-            para_lines.push(Line::from(vec![Span::raw("   "), Span::raw(chunk.clone())]));
-        }
-    }
-
-    if has_overflow {
-        let hidden = wrapped.len() - show_count;
-        para_lines.push(Line::from(Span::styled(
-            format!("   ... {} more line(s)", hidden),
-            Style::default().add_modifier(Modifier::DIM),
-        )));
-    }
-
-    let input = Paragraph::new(para_lines).block(
+    let line = Line::from(vec![
+        Span::styled(
+            " > ",
+            Style::default()
+                .fg(theme.primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(display_text),
+    ]);
+    let para = Paragraph::new(line).block(
         Block::default()
-            .borders(Borders::TOP)
-            .border_style(Style::default().fg(theme.primary))
-            .title(Span::styled(
-                " Shift+Tab:mode | Enter:send | Shift+Enter:↵ | Ctrl+Tab:think | Ctrl+C:quit ",
-                Style::default().fg(theme.accent),
-            )),
+            .borders(Borders::NONE),
     );
-    f.render_widget(input, area);
+    f.render_widget(para, area);
 }
 
-/// Position the terminal cursor at the current input cursor location.
+/// Position the terminal cursor in the input row.
 fn set_input_cursor(f: &mut Frame, ui: &UiState, area: Rect) {
-    let text_width = area.width.saturating_sub(3) as usize; // " > " takes 3 cols
+    let text_width = area.width.saturating_sub(3) as usize;
     if text_width == 0 {
         return;
     }
 
-    // Count characters before the cursor position
     let chars_before: usize = ui.input_text[..ui.input_cursor].chars().count();
+    let chars_total: usize = ui.input_text.chars().count();
 
-    // The first line has a 3-char " > " prefix, continuation lines have "   "
-    let prefix = 3u16;
-    let line = (chars_before / text_width) as u16;
-    let col = (chars_before % text_width) as u16;
-
-    let x = area.x + prefix + col;
-    let y = area.y + 1 + line; // +1 for the top border
-
-    if y < area.y + area.height {
-        f.set_cursor_position((x, y));
-    }
-}
-
-/// Break text into lines that fit within `width` characters.
-fn wrap_input_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![String::new()];
-    }
-
-    let mut lines = Vec::new();
-    let mut current = String::new();
-
-    for ch in text.chars() {
-        current.push(ch);
-        if current.chars().count() >= width {
-            lines.push(std::mem::take(&mut current));
-        }
-    }
-
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-
-    lines
-}
-
-/// Estimate how many content lines the input text will occupy when wrapped.
-fn estimate_input_lines(text: &str, area_width: u16) -> u16 {
-    if area_width <= 3 {
-        return 1;
-    }
-    let text_width = (area_width - 3) as usize;
-    if text_width == 0 {
-        return 1;
-    }
-    let char_count = text.chars().count();
-    char_count.div_ceil(text_width).max(1) as u16
-}
-
-fn truncate_model_name(name: &str, max: usize) -> String {
-    if name.len() <= max {
-        name.to_string()
+    // If input overflows, the display is right-aligned
+    let display_offset = if chars_total > text_width {
+        chars_before.saturating_sub(chars_total.saturating_sub(text_width))
     } else {
-        format!("{}..", &name[..max.saturating_sub(2)])
-    }
+        chars_before
+    };
+
+    let x = area.x + 3 + display_offset.min(text_width) as u16;
+    let y = area.y;
+
+    f.set_cursor_position((x, y));
 }
 
 fn truncate_path(path: &str, max: usize) -> String {
@@ -806,36 +430,33 @@ mod tests {
         ui.add_output(OutputLine::User("test".into()));
         ui.add_output(OutputLine::Assistant("response".into()));
         assert_eq!(ui.output_lines.len(), 2);
+        assert_eq!(ui.pending_inline.len(), 2);
     }
 
     #[test]
-    fn scroll_up_disables_auto_scroll() {
+    fn thinking_not_queued_inline() {
         let mut ui = UiState::default();
-        assert!(ui.auto_scroll);
-        ui.scroll_up(5);
-        assert!(!ui.auto_scroll);
+        ui.add_output(OutputLine::Thinking(()));
+        assert_eq!(ui.output_lines.len(), 1);
+        assert!(ui.pending_inline.is_empty()); // Thinking not queued
     }
 
     #[test]
-    fn add_output_respects_scroll_state() {
+    fn streaming_flushes_complete_lines() {
         let mut ui = UiState::default();
-        // Default is auto_scroll=true, so add_output scrolls to bottom
-        ui.add_output(OutputLine::User("test".into()));
-        assert!(ui.auto_scroll);
-        // After scrolling up, new output should not auto-scroll
-        ui.scroll_up(1);
-        assert!(!ui.auto_scroll);
-        ui.add_output(OutputLine::User("test2".into()));
-        assert!(!ui.auto_scroll); // stays false
+        ui.append_stream_chunk("Hello ");
+        ui.append_stream_chunk("world\nNext ");
+        assert_eq!(ui.pending_inline.len(), 1); // "Hello world" flushed
+        assert_eq!(ui.streaming_partial, "Next ");
     }
 
     #[test]
-    fn truncate_model() {
-        assert_eq!(truncate_model_name("qwen3:4b", 12), "qwen3:4b");
-        assert_eq!(
-            truncate_model_name("very-long-model-name:72b", 12),
-            "very-long-.."
-        );
+    fn finish_stream_flushes_partial() {
+        let mut ui = UiState::default();
+        ui.append_stream_chunk("partial line");
+        assert!(ui.pending_inline.is_empty());
+        ui.finish_stream();
+        assert_eq!(ui.pending_inline.len(), 1); // partial flushed
     }
 
     #[test]
@@ -845,19 +466,5 @@ mod tests {
         let truncated = truncate_path(long, 15);
         assert!(truncated.starts_with("..."));
         assert!(truncated.len() <= 15);
-    }
-
-    #[test]
-    fn render_markdown_headers() {
-        let theme = Theme::default();
-        let lines = render_markdown("# Hello\n## World\n### Sub", &theme);
-        assert_eq!(lines.len(), 3);
-    }
-
-    #[test]
-    fn render_diff_colors() {
-        let theme = Theme::default();
-        let lines = render_diff(&["added line".into()], &["removed line".into()], &theme);
-        assert_eq!(lines.len(), 2);
     }
 }

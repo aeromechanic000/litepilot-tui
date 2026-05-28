@@ -30,7 +30,7 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::backend::CrosstermBackend;
-use ratatui::Terminal;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -117,7 +117,7 @@ fn main() -> Result<()> {
     );
     tracing::info!("mode: {}", config.default_mode);
 
-    // Setup terminal
+    // Setup terminal — fullscreen for wizard
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     crossterm::execute!(stdout, EnterAlternateScreen)?;
@@ -126,6 +126,14 @@ fn main() -> Result<()> {
 
     // Run setup wizard — user confirms or changes Ollama URL and model selection
     let config = wizard::run(&mut terminal, config, &workspace)?;
+
+    // Switch from fullscreen wizard to inline terminal for main app
+    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    drop(terminal);
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::with_options(backend, TerminalOptions {
+        viewport: Viewport::Inline(3),
+    })?;
 
     // Load session if --resume was specified
     let resume_session = match args.resume {
@@ -178,7 +186,6 @@ fn main() -> Result<()> {
 
     // Restore terminal (even if panic occurred)
     disable_raw_mode()?;
-    crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     match result {
@@ -225,10 +232,22 @@ fn run_app(
         )));
     }
 
-    // Welcome message
-    ui_state.add_output(OutputLine::System(
-        "Welcome to LitePilot! Ollama-powered local AI assistant.".into(),
-    ));
+    // Welcome banner
+    let version = env!("CARGO_PKG_VERSION");
+    let banner = format!(
+        "version: {v:<6} \n\
+        ╔═════════════════════════════════════════════════╗\n\
+        ║      _      _ _       ____  _ _       _         ║\n\
+        ║     | |    (_) |_ ___|  _ \\(_) | ___ | |_       ║\n\
+        ║     | |    | | __/ _ \\ |_) | | |/ _ \\| __|      ║\n\
+        ║     | |____| | ||  __/  __/| | | (_) | |_       ║\n\
+        ║     |______|_|\\__\\___|_|   |_|_|\\___/ \\__|      ║\n\
+        ║                                                 ║\n\
+        ║     Ollama-powered AI assistant in Teminal      ║\n\
+        ╚═════════════════════════════════════════════════╝",
+        v = version
+    );
+    ui_state.add_output(OutputLine::System(banner));
     ui_state.add_output(OutputLine::System(
         "Shift+Tab: mode | Enter: send | Shift+Enter: newline | Ctrl+Tab: think | Ctrl+C: quit | /skills: list skills".into(),
     ));
@@ -270,6 +289,12 @@ fn run_app(
             "Connected to Ollama at {}",
             app_state.config.ollama_endpoint
         )));
+        ui_state.add_output(OutputLine::System(format!(
+            "[Fast]:{} [Core]:{} [Audit]:{}",
+            app_state.config.effective_fast_model(),
+            app_state.config.core_model,
+            app_state.config.effective_audit_model()
+        )));
     } else {
         tracing::error!("ollama ping FAILED: {}", app_state.config.ollama_endpoint);
         ui_state.add_output(OutputLine::Error(format!(
@@ -282,6 +307,10 @@ fn run_app(
     let (result_tx, result_rx) = mpsc::channel::<agent::retry::PipelineResult>();
 
     loop {
+        // Flush pending output above the viewport via insert_before()
+        flush_pending_output(terminal, &mut ui_state)?;
+
+        // Render the inline viewport (status + activity + input)
         terminal.draw(|f| ui::draw(f, &app_state, &mut ui_state))?;
 
         // Check for completed LLM responses (non-blocking)
@@ -1395,24 +1424,13 @@ fn run_app(
                         (KeyModifiers::NONE, KeyCode::Backspace) => {
                             ui_state.backspace();
                         }
-                        // Escape: cancel pending plan or scroll to bottom
+                        // Escape: cancel pending plan
                         (KeyModifiers::NONE, KeyCode::Esc) => {
                             if app_state.pending_plan.take().is_some() {
                                 ui_state.add_output(OutputLine::System("Plan cancelled.".into()));
-                            } else {
-                                ui_state.scroll_to_bottom();
                             }
                         }
-                        // Page Up: scroll chat up by half a page
-                        (KeyModifiers::NONE, KeyCode::PageUp) => {
-                            let amount = (terminal.size().map(|s| s.height / 2).unwrap_or(10)).max(5);
-                            ui_state.scroll_up(amount);
-                        }
-                        // Page Down: scroll chat down by half a page
-                        (KeyModifiers::NONE, KeyCode::PageDown) => {
-                            let amount = (terminal.size().map(|s| s.height / 2).unwrap_or(10)).max(5);
-                            ui_state.scroll_down(amount);
-                        }
+                        // Page Up/Down: no virtual scrolling (terminal native scrollback)
                         // Character input (allow NONE or SHIFT for uppercase)
                         (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(c)) => {
                             app_state.history_index = 0;
@@ -1452,6 +1470,24 @@ fn run_app(
         }
     }
 
+    Ok(())
+}
+
+/// Flush pending inline output above the viewport using `terminal.insert_before()`.
+fn flush_pending_output(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    ui_state: &mut ui::UiState,
+) -> Result<()> {
+    if ui_state.pending_inline.is_empty() {
+        return Ok(());
+    }
+    let lines = std::mem::take(&mut ui_state.pending_inline);
+    let theme = &ui_state.theme;
+    let line_count = ui::inline::estimate_line_count(&lines, 80);
+
+    terminal.insert_before(line_count, |buf| {
+        ui::inline::render_output_lines(buf, &lines, &theme);
+    })?;
     Ok(())
 }
 
