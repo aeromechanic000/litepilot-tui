@@ -1981,14 +1981,36 @@ fn spawn_execution_with_plan(
             } else {
                 let mut s = "\n\n[Previous steps completed]\n".to_string();
                 for (j, result) in step_results.iter().enumerate() {
-                    let preview: String = result.chars().take(300).collect();
-                    s.push_str(&format!("Step {}: {}...\n", j + 1, preview));
+                    // Extract file paths from previous results for quick reference
+                    let file_paths: Vec<&str> = result
+                        .lines()
+                        .filter(|l| l.trim().starts_with("### FILE:"))
+                        .map(|l| l.trim().trim_start_matches("### FILE:").trim())
+                        .collect();
+                    if !file_paths.is_empty() {
+                        s.push_str(&format!(
+                            "Step {}: {} → files: {}\n",
+                            j + 1,
+                            steps.get(j).map(|s| s.as_str()).unwrap_or("(completed)"),
+                            file_paths.join(", ")
+                        ));
+                    } else {
+                        // Non-file result (search, command output, etc.) — include short summary
+                        let preview: String = result.chars().take(500).collect();
+                        s.push_str(&format!(
+                            "Step {}: {} → {}\n",
+                            j + 1,
+                            steps.get(j).map(|s| s.as_str()).unwrap_or("(completed)"),
+                            preview
+                        ));
+                    }
                 }
+                s.push_str("\nIMPORTANT: Read any files from previous steps before proceeding. Files listed above contain the actual content from those steps.\n");
                 s
             };
 
             let user_msg = format!(
-                "Original request: {}\n\nPlan:\n{}\n{}Now execute ONLY step {} of {}: {}\n\nOutput file content using this format:\n### FILE: relative/path/to/file\n### ACTION: create\n```\nfile content\n```",
+                "Original request: {}\n\nPlan:\n{}\n{}Now execute ONLY step {} of {}: {}\n\nWorkflow for this step:\n1. If previous steps created files, READ them first to recall their content\n2. Generate the content needed for THIS step\n3. Write the result to a file immediately using the format below\n\nOutput file content using this format:\n### FILE: relative/path/to/file\n### ACTION: create|modify\n```\nfile content\n```",
                 input, plan, prev_summary, step_num, total_steps, step_desc,
             );
 

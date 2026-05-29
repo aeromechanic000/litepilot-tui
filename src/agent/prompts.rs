@@ -13,6 +13,11 @@ Rules:
 - Be specific about file paths and actions
 - Keep each step to one line
 
+File-as-memory planning:
+- Design each step to write its output to a file immediately — the file becomes the agent's memory for subsequent steps.
+- Later steps should reference files written by earlier steps (e.g. "Read index.html from step 2, then add the CSS link").
+- NEVER plan a step that says "output the final result" — instead, plan steps that build content incrementally into files.
+
 Output format: numbered steps, one per line:
 1. Step description
 2. [SEARCH] Research latest API for authentication
@@ -39,6 +44,11 @@ pub const PLANNING_SYSTEM: &str = r#"You are a project planning assistant. Given
 4. Identify dependencies and tools needed
 5. Suggest a development order
 
+Planning principles:
+- Each step should write its output to a file immediately. Files act as the agent's persistent memory between steps.
+- Later steps should read files from earlier steps rather than relying on context to "remember" content.
+- Design steps that build incrementally: create skeleton → add content → refine.
+
 Output format:
 - Use numbered or bulleted lists for steps
 - Clearly mark file paths
@@ -57,6 +67,13 @@ Rules:
 - For file modification: only output the changed sections, not the entire file
 - If unsure about an API or library, output a comment placeholder (TODO) instead of guessing
 - If a file is too large for one step, create a skeleton with placeholders marked TODO
+
+File-as-memory principle:
+- Local files are your external memory. When you generate content, write it to a file IMMEDIATELY.
+- Before generating content for a step, first READ any files created in previous steps to recall what was already done.
+- NEVER rely on your running context to "remember" content from earlier steps — always read it back from disk.
+- If a previous step created or modified a file, that file now holds the ground truth. Read it before building on it.
+- This means your workflow for each step should be: read relevant local files → think and generate → write result to file.
 
 Output format for files:
 ### FILE: path/to/file
